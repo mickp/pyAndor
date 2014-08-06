@@ -5,7 +5,6 @@ Images were getting lost, most likely due to ExposureThread and
 CorrectionThread working on the same image array.  This has been
 replaced with a ring buffer.
 TODO: tidy the code.
-TODO: check that image times are correct.
 TODO: add checks to report buffer overruns.
 (TODO: wrappedAndorFunc could probably be implemented as a decorator.)
 
@@ -22,7 +21,7 @@ import win32event
 
 ## The number of images the buffer can store.
 # 512 x 512 x 16-bits --> 512 kb per image.
-BUFFER_LENGTH = 1000
+BUFFER_LENGTH = 100
 
 
 ## Amount of time to wait for an event to trigger in the various *Thread 
@@ -142,15 +141,11 @@ class Camera:
         # self.outamp_cache. I suspect this is all going to need to be redone
         # when we re-add correction files.
         self.rot_cache = 0
-        ## Not really sure what this is used for, but appears to track
-        # how many times getImage is called. The fact that these are 
-        # arrays appears to be irrelevant as only the first element is ever
-        # used; apparently there were plans at some point to make these into
-        # ring buffers, though I'm not clear on why this is wanted.
-        self.picNum_arr = numpy.zeros(10, dtype = numpy.uint16)
+        ## Ring buffer for exposure number.
+        self.picNum_arr = numpy.empty(BUFFER_LENGTH, dtype = numpy.uint16)
         ## As picNum_arr, but in this case tracks the time when an image is
         # obtained. 
-        self.picTime_arr = numpy.zeros(10, dtype = numpy.float32)
+        self.picTime_arr = numpy.empty(BUFFER_LENGTH, dtype = numpy.float32)
 
         ## This a ring buffer for images.  It will be allocated elsewhere.
         self.ring = []
@@ -166,7 +161,7 @@ class Camera:
         # immediately; exposureThread needs to grab a semaphore first, 
         # otherwise correctionThread will to operate on no data.
         self.exposureThread = ExposureThread(self)
-        self.correctionThread = CorrectionThread(self, self.picNum_arr, self.picTime_arr)
+        self.correctionThread = CorrectionThread(self)
         self.correctionThread.setClient(self.clientConnection)
 
 
@@ -323,6 +318,9 @@ class Camera:
         self.acquisitionMode = mode
         print "acq mode = ",mode
 
+        # reset exposure counter
+        self.exposureThread.exposureCounter = 0
+
 
     def controlledShutdown(self, waitMinTemp=-40, deltaSecs = 3):
         self.resetToSafe()
@@ -355,10 +353,6 @@ class Camera:
             f = andorWrap.GetVSSpeed(i)
             s += "   GetVSSpeed %d: %s\n" % (i, f)
         return s
-
-
-    def resetPic0time(self):
-        self.correctionThread.pic0time = time.clock()
 
 
     def setExposureTime(self, ms):
@@ -430,8 +424,6 @@ class Camera:
 
     def getImage(self):
         ## Reads an image from the camera and puts it into imageArray.
-        self.picNum_arr[0] += 1
-        self.picTime_arr[0] = time.clock()
         try:
             andorWrap.GetOldestImage16(self.imageArray)
             return self.imageArray
@@ -759,6 +751,8 @@ class ExposureThread(threading.Thread):
         self.cam.semaphore.acquire()
 
         import time
+        t0 = None
+
         while not self.haveQuit:
             x = win32event.WaitForSingleObject(exposureEvent, DEFAULT_TIMEOUT_MS)#HERE WE WAIT FOR IRQ 
             # Reset the event so that subsequent events will be detected.
@@ -767,15 +761,20 @@ class ExposureThread(threading.Thread):
 
             if x == 0 and not self.camAborted: # not timed out
                 try:
-                    print "try get image"
+                    now = time.clock()
+                    self.cam.picTime_arr[self.ring_i] = now
                     # MAP 20140806: hint - this populates imageArray.
                     self.cam.getImage()
                     if self.skipNextNimages > 0:
+                        print "Skipping exposure at clock = %g." % now
                         self.skipNextNimages -= 1
                     else:
+                        if self.exposureCount == 0: t0 = now
                         self.exposureCount += 1
+                        print "Buffering exposure %d  at  clock = %g." % (self.exposureCount, now - t0)
                         if self.exposureCount % self.skipEveryNimages == 0:
                             # Copy image data to buffer and update buffer_index
+                            self.cam.picNum_arr[self.ring_i] = self.exposureCount
                             self.cam.ring[self.ring_i][:,:] = self.cam.imageArray
                             self.cam.semaphore.release()
                             self.ring_i += 1
@@ -788,13 +787,11 @@ class ExposureThread(threading.Thread):
 
 
 class CorrectionThread(threading.Thread):
-    def __init__(self, cam, picNum_arr, picTime_arr):
+    def __init__(self, cam):
         threading.Thread.__init__(self)
         self.haveQuit = 0
 
         self.cam = cam
-        self.picNum_arr, self.picTime_arr = picNum_arr, picTime_arr
-        self.pic0time      = time.clock()
 
         darkPixelMaxInt = 10000
         self.darkPixelHist = numpy.zeros((darkPixelMaxInt), dtype = numpy.int32)
@@ -920,10 +917,18 @@ class CorrectionThread(threading.Thread):
                         top = None
                     self.newImage[:,:] = self.cam.ring[self.ring_i][bottom:top, left:right]
 
-                    print "Received image with mean", self.newImage.mean()
+                    buffers = self.cam.exposureThread.ring_i - self.ring_i
+                    if buffers < 0: buffers = buffers + BUFFER_LENGTH
+
+                    print "... ... sent image %d from clock = %g. \t Using %d buffers." % (
+                            self.cam.picNum_arr[self.ring_i],
+                            self.cam.picTime_arr[self.ring_i],
+                            buffers)
 
                     if self.clientConnection is not None:
-                        self.clientConnection.receiveData('new image', self.newImage, time.time())
+                        self.clientConnection.receiveData('new image',
+                                                          self.newImage, 
+                                                          self.cam.picTime_arr[self.ring_i])
                 except Exception, e:
                     print "Exception in correction thread: %s" % e
                     print ''.join(Pyro4.util.getPyroTraceback())
@@ -931,7 +936,7 @@ class CorrectionThread(threading.Thread):
 
                 finally:
                     self.ring_i += 1
-                    if self.ring_i >= BUFFER_LENGTH - 1:
+                    if self.ring_i >= BUFFER_LENGTH:
                         self.ring_i = 0
             else:
                 time.sleep(0.01)
