@@ -1,17 +1,17 @@
 import os.path, re, sys, glob
 import ctypes
 import ctypes.util
-from ctypes import c_int, c_uint, c_long, c_ulong
-from ctypes import c_longlong, c_ulonglong
+from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
+from ctypes import c_float, c_double, c_char, c_char_p
 from ctypes import Structure
 
-ULONG = c_ulong
+_dll = ctypes.WinDLL('atmcd64d.dll')
 
 """Version Information Definitions"""
 ## Version infomration enumeration
-class AT_VersionInFold(int): pass
-AT_SDKVersion = AT_VersionInFold(0x40000000)
-AT_DeviceDriverVersion = AT_VersionInFold(0x40000001)
+class AT_VersionInfoId(c_int): pass
+AT_SDKVersion = AT_VersionInfoId(0x40000000)
+AT_DeviceDriverVersion = AT_VersionInfoId(0x40000001)
 
 # No. of elements in version info.
 AT_NoOfVersionInfoIds = 2
@@ -22,7 +22,7 @@ AT_CONTROLLER_CARD_MODEL_LEN = 80
 
 """DDG Lite Definitions"""
 ## Channel enumeration
-class AT_DDGLiteChannelId(int): pass
+class AT_DDGLiteChannelId(c_int): pass
 AT_DDGLite_ChannelA = AT_DDGLiteChannelId(0x40000000)
 AT_DDGLite_ChannelB = AT_DDGLiteChannelId(0x40000001)
 AT_DDGLite_ChannelC = AT_DDGLiteChannelId(0x40000002)
@@ -109,11 +109,6 @@ class WHITEBALANCEINFO(Structure):
         ]
 
 WhiteBalanceInfo = WHITEBALANCEINFO
-
-at_32 = c_long
-at_u32 = c_ulong
-at_64 = c_longlong
-at_u64 = c_ulonglong
 
 
 """Status codes"""
@@ -388,1082 +383,472 @@ AC_EMGAIN_12BIT = 2
 AC_EMGAIN_LINEAR12 = 4
 AC_EMGAIN_REAL12 = 8
 
-"""Functions
+"""DLL Functions
+
+We could just export _dll and call _dll.func, but removing the
+_dll attribute lookup reduces the calling overhead."""
+function_list = [
+    'AbortAcquisition(void)',
+    'CancelWait(void)',
+    'CoolerOFF(void)',
+    'CoolerON(void)',
+    'DemosaicImage(WORD * grey, WORD * red, WORD * green, WORD * blue, ColorDemosaicInfo * info)',
+    'EnableKeepCleans(int iMode)',
+    'FreeInternalMemory(void)',
+    'GetAcquiredData(at_32 * arr, unsigned long size)',
+    'GetAcquiredData16(WORD * arr, unsigned long size)',
+    'GetAcquiredFloatData(float * arr, unsigned long size)',
+    'GetAcquisitionProgress(long * acc, long * series)',
+    'GetAcquisitionTimings(float * exposure, float * accumulate, float * kinetic)',
+    'GetAdjustedRingExposureTimes(int inumTimes, float * fptimes)',
+    'GetAllDMAData(at_32 * arr, unsigned long size)',
+    'GetAmpDesc(int index, char * name, int length)',
+    'GetAmpMaxSpeed(int index, float * speed)',
+    'GetAvailableCameras(long * totalCameras)',
+    'GetBackground(at_32 * arr, unsigned long size)',
+    'GetBaselineClamp(int * state)',
+    'GetBitDepth(int channel, int * depth)',
+    'GetCameraEventStatus(DWORD * camStatus)',
+    'GetCameraHandle(long cameraIndex, long * cameraHandle)',
+    'GetCameraInformation(int index, long * information)',
+    'GetCameraSerialNumber(int * number)',
+    'GetCapabilities(AndorCapabilities * caps)',
+    'GetControllerCardModel(char * controllerCardModel)',
+    'GetCountConvertWavelengthRange(float * minval, float * maxval)',
+    'GetCurrentCamera(long * cameraHandle)',
+    'GetCYMGShift(int * iXshift, int * iYShift)',
+    'GetDDGExternalOutputEnabled(at_u32 uiIndex, at_u32 * puiEnabled)',
+    'GetDDGExternalOutputPolarity(at_u32 uiIndex, at_u32 * puiPolarity)',
+    'GetDDGExternalOutputStepEnabled(at_u32 uiIndex, at_u32 * puiEnabled)',
+    'GetDDGExternalOutputTime(at_u32 uiIndex, at_u64 * puiDelay, at_u64 * puiWidth)',
+    'GetDDGTTLGateWidth(at_u64 opticalWidth, at_u64 * ttlWidth)',
+    'GetDDGGateTime(at_u64 * puiDelay, at_u64 * puiWidth)',
+    'GetDDGInsertionDelay(int * piState)',
+    'GetDDGIntelligate(int * piState)',
+    'GetDDGIOC(int * state)',
+    'GetDDGIOCFrequency(double * frequency)',
+    'GetDDGIOCNumber(unsigned long * numberPulses)',
+    'GetDDGIOCNumberRequested(at_u32 * pulses)',
+    'GetDDGIOCPeriod(at_u64 * period)',
+    'GetDDGIOCPulses(int * pulses)',
+    'GetDDGIOCTrigger(at_u32 * trigger)',
+    'GetDDGOpticalWidthEnabled(at_u32 * puiEnabled)',
+    'GetDDGLiteGlobalControlByte(unsigned char * control)',
+    'GetDDGLiteControlByte(AT_DDGLiteChannelId channel, unsigned char * control)',
+    'GetDDGLiteInitialDelay(AT_DDGLiteChannelId channel, float * fDelay)',
+    'GetDDGLitePulseWidth(AT_DDGLiteChannelId channel, float * fWidth)',
+    'GetDDGLiteInterPulseDelay(AT_DDGLiteChannelId channel, float * fDelay)',
+    'GetDDGLitePulsesPerExposure(AT_DDGLiteChannelId channel, at_u32 * ui32Pulses)',
+    'GetDDGPulse(double wid, double resolution, double * Delay, double * Width)',
+    'GetDDGStepCoefficients(at_u32 mode, double * p1, double * p2)',
+    'GetDDGStepMode(at_u32 * mode)',
+    'GetDetector(int * xpixels, int * ypixels)',
+    'GetDICameraInfo(void * info)',
+    'GetEMAdvanced(int * state)',
+    'GetEMCCDGain(int * gain)',
+    'GetEMGainRange(int * low, int * high)',
+    'GetExternalTriggerTermination(at_u32 * puiTermination)',
+    'GetFastestRecommendedVSSpeed(int * index, float * speed)',
+    'GetFIFOUsage(int * FIFOusage)',
+    'GetFilterMode(int * mode)',
+    'GetFKExposureTime(float * time)',
+    'GetFKVShiftSpeed(int index, int * speed)',
+    'GetFKVShiftSpeedF(int index, float * speed)',
+    'GetFrontEndStatus(int * piFlag)',
+    'GetGateMode(int * piGatemode)',
+    'GetHardwareVersion(unsigned int * PCB, unsigned int * Decode, unsigned int * dummy1, unsigned int * dummy2, unsigned int * CameraFirmwareVersion, unsigned int * CameraFirmwareBuild)',
+    'GetHeadModel(char * name)',
+    'GetHorizontalSpeed(int index, int * speed)',
+    'GetHSSpeed(int channel, int typ, int index, float * speed)',
+    'GetHVflag(int * bFlag)',
+    'GetID(int devNum, int * id)',
+    'GetImageFlip(int * iHFlip, int * iVFlip)',
+    'GetImageRotate(int * iRotate)',
+    'GetImages(long first, long last, at_32 * arr, unsigned long size, long * validfirst, long * validlast)',
+    'GetImages16(long first, long last, WORD * arr, unsigned long size, long * validfirst, long * validlast)',
+    'GetImagesPerDMA(unsigned long * images)',
+    'GetIRQ(int * IRQ)',
+    'GetKeepCleanTime(float * KeepCleanTime)',
+    'GetMaximumBinning(int ReadMode, int HorzVert, int * MaxBinning)',
+    'GetMaximumExposure(float * MaxExp)',
+    'GetMCPGain(int * piGain)',
+    'GetMCPGainRange(int * iLow, int * iHigh)',
+    'GetMCPGainTable(int iNum, int * piGain, float * pfPhotoepc)',
+    'GetMCPVoltage(int * iVoltage)',
+    'GetMinimumImageLength(int * MinImageLength)',
+    'GetMinimumNumberInSeries(int * number)',
+    'GetMostRecentColorImage16(unsigned long size, int algorithm, WORD * red, WORD * green, WORD * blue)',
+    'GetMostRecentImage(at_32 * arr, unsigned long size)',
+    'GetMostRecentImage16(WORD * arr, unsigned long size)',
+    'GetMSTimingsData(SYSTEMTIME * TimeOfStart, float * pfDifferences, int inoOfImages)',
+    'GetMetaDataInfo(SYSTEMTIME * TimeOfStart, float * pfTimeFromStart, unsigned int index)',
+    'GetMSTimingsEnabled(void)',
+    'GetNewData(at_32 * arr, unsigned long size)',
+    'GetNewData16(WORD * arr, unsigned long size)',
+    'GetNewData8(unsigned char * arr, unsigned long size)',
+    'GetNewFloatData(float * arr, unsigned long size)',
+    'GetNumberADChannels(int * channels)',
+    'GetNumberAmp(int * amp)',
+    'GetNumberAvailableImages(at_32 * first, at_32 * last)',
+    'GetNumberDDGExternalOutputs(at_u32 * puiCount)',
+    'GetNumberDevices(int * numDevs)',
+    'GetNumberFKVShiftSpeeds(int * number)',
+    'GetNumberHorizontalSpeeds(int * number)',
+    'GetNumberHSSpeeds(int channel, int typ, int * speeds)',
+    'GetNumberNewImages(long * first, long * last)',
+    'GetNumberPhotonCountingDivisions(at_u32 * noOfDivisions)',
+    'GetNumberPreAmpGains(int * noGains)',
+    'GetNumberRingExposureTimes(int * ipnumTimes)',
+    'GetNumberIO(int * iNumber)',
+    'GetNumberVerticalSpeeds(int * number)',
+    'GetNumberVSAmplitudes(int * number)',
+    'GetNumberVSSpeeds(int * speeds)',
+    'GetOldestImage(at_32 * arr, unsigned long size)',
+    'GetOldestImage16(WORD * arr, unsigned long size)',
+    'GetPhosphorStatus(int * piFlag)',
+    'GetPhysicalDMAAddress(unsigned long * Address1, unsigned long * Address2)',
+    'GetPixelSize(float * xSize, float * ySize)',
+    'GetPreAmpGain(int index, float * gain)',
+    'GetPreAmpGainText(int index, char * name, int length)',
+    'GetDualExposureTimes(float * exposure1, float * exposure2)',
+    'GetQE(char * sensor, float wavelength, unsigned int mode, float * QE)',
+    'GetReadOutTime(float * ReadOutTime)',
+    'GetRegisterDump(int * mode)',
+    'GetRingExposureRange(float * fpMin, float * fpMax)',
+    'GetSDK3Handle(int * Handle)',
+    'GetSensitivity(int channel, int horzShift, int amplifier, int pa, float * sensitivity)',
+    'GetShutterMinTimes(int * minclosingtime, int * minopeningtime)',
+    'GetSizeOfCircularBuffer(long * index)',
+    'GetSlotBusDeviceFunction(DWORD * dwslot, DWORD * dwBus, DWORD * dwDevice, DWORD * dwFunction)',
+    'GetSoftwareVersion(unsigned int * eprom, unsigned int * coffile, unsigned int * vxdrev, unsigned int * vxdver, unsigned int * dllrev, unsigned int * dllver)',
+    'GetSpoolProgress(long * index)',
+    'GetStartUpTime(float * time)',
+    'GetStatus(int * status)',
+    'GetTECStatus(int * piFlag)',
+    'GetTemperature(int * temperature)',
+    'GetTemperatureF(float * temperature)',
+    'GetTemperatureRange(int * mintemp, int * maxtemp)',
+    'GetTemperatureStatus(float * SensorTemp, float * TargetTemp, float * AmbientTemp, float * CoolerVolts)',
+    'GetTotalNumberImagesAcquired(long * index)',
+    'GetIODirection(int index, int * iDirection)',
+    'GetIOLevel(int index, int * iLevel)',
+    'GetVersionInfo(AT_VersionInfoId arr, char * szVersionInfo, at_u32 ui32BufferLen)',
+    'GetVerticalSpeed(int index, int * speed)',
+    'GetVirtualDMAAddress(void ** Address1, void ** Address2)',
+    'GetVSAmplitudeString(int index, char * text)',
+    'GetVSAmplitudeFromString(char * text, int * index)',
+    'GetVSAmplitudeValue(int index, int * value)',
+    'GetVSSpeed(int index, float * speed)',
+    'GPIBReceive(int id, short address, char * text, int size)',
+    'GPIBSend(int id, short address, char * text)',
+    'I2CBurstRead(BYTE i2cAddress, long nBytes, BYTE * data)',
+    'I2CBurstWrite(BYTE i2cAddress, long nBytes, BYTE * data)',
+    'I2CRead(BYTE deviceID, BYTE intAddress, BYTE * pdata)',
+    'I2CReset(void)',
+    'I2CWrite(BYTE deviceID, BYTE intAddress, BYTE data)',
+    'IdAndorDll(void)',
+    'InAuxPort(int port, int * state)',
+    'Initialize(char * dir)',
+    'InitializeDevice(char * dir)',
+    'IsAmplifierAvailable(int iamp)',
+    'IsCoolerOn(int * iCoolerStatus)',
+    'IsCountConvertModeAvailable(int mode)',
+    'IsInternalMechanicalShutter(int * InternalShutter)',
+    'IsPreAmpGainAvailable(int channel, int amplifier, int index, int pa, int * status)',
+    'IsTriggerModeAvailable(int iTriggerMode)',
+    'Merge(const at_32 * arr, long nOrder, long nPoint, long nPixel, float * coeff, long fit, long hbin, at_32 * output, float * start, float * step_Renamed)',
+    'OutAuxPort(int port, int state)',
+    'PrepareAcquisition(void)',
+    'SaveAsBmp(char * path, char * palette, long ymin, long ymax)',
+    'SaveAsCommentedSif(char * path, char * comment)',
+    'SaveAsEDF(char * szPath, int iMode)',
+    'SaveAsFITS(char * szFileTitle, int typ)',
+    'SaveAsRaw(char * szFileTitle, int typ)',
+    'SaveAsSif(char * path)',
+    'SaveAsSPC(char * path)',
+    'SaveAsTiff(char * path, char * palette, int position, int typ)',
+    'SaveAsTiffEx(char * path, char * palette, int position, int typ, int mode)',
+    'SaveEEPROMToFile(char * cFileName)',
+    'SaveToClipBoard(char * palette)',
+    'SelectDevice(int devNum)',
+    'SendSoftwareTrigger(void)',
+    'SetAccumulationCycleTime(float time)',
+    'SetAcqStatusEvent(HANDLE statusEvent)',
+    'SetAcquisitionMode(int mode)',
+    'SetAcquisitionType(int typ)',
+    'SetADChannel(int channel)',
+    'SetAdvancedTriggerModeState(int iState)',
+    'SetBackground(at_32 * arr, unsigned long size)',
+    'SetBaselineClamp(int state)',
+    'SetBaselineOffset(int offset)',
+    'SetCameraLinkMode(int mode)',
+    'SetCameraStatusEnable(DWORD Enable)',
+    'SetChargeShifting(unsigned int NumberRows, unsigned int NumberRepeats)',
+    'SetComplexImage(int numAreas, int * areas)',
+    'SetCoolerMode(int mode)',
+    'SetCountConvertMode(int Mode)',
+    'SetCountConvertWavelength(float wavelength)',
+    'SetCropMode(int active, int cropHeight, int reserved)',
+    'SetCurrentCamera(long cameraHandle)',
+    'SetCustomTrackHBin(int bin)',
+    'SetDataType(int typ)',
+    'SetDACOutput(int iOption, int iResolution, int iValue)',
+    'SetDACOutputScale(int iScale)',
+    'SetDDGAddress(BYTE t0, BYTE t1, BYTE t2, BYTE t3, BYTE address)',
+    'SetDDGExternalOutputEnabled(at_u32 uiIndex, at_u32 uiEnabled)',
+    'SetDDGExternalOutputPolarity(at_u32 uiIndex, at_u32 uiPolarity)',
+    'SetDDGExternalOutputStepEnabled(at_u32 uiIndex, at_u32 uiEnabled)',
+    'SetDDGExternalOutputTime(at_u32 uiIndex, at_u64 uiDelay, at_u64 uiWidth)',
+    'SetDDGGain(int gain)',
+    'SetDDGGateStep(double step_Renamed)',
+    'SetDDGGateTime(at_u64 uiDelay, at_u64 uiWidth)',
+    'SetDDGInsertionDelay(int state)',
+    'SetDDGIntelligate(int state)',
+    'SetDDGIOC(int state)',
+    'SetDDGIOCFrequency(double frequency)',
+    'SetDDGIOCNumber(unsigned long numberPulses)',
+    'SetDDGIOCPeriod(at_u64 period)',
+    'SetDDGIOCTrigger(at_u32 trigger)',
+    'SetDDGOpticalWidthEnabled(at_u32 uiEnabled)',
+    'SetDDGLiteGlobalControlByte(unsigned char control)',
+    'SetDDGLiteControlByte(AT_DDGLiteChannelId channel, unsigned char control)',
+    'SetDDGLiteInitialDelay(AT_DDGLiteChannelId channel, float fDelay)',
+    'SetDDGLitePulseWidth(AT_DDGLiteChannelId channel, float fWidth)',
+    'SetDDGLiteInterPulseDelay(AT_DDGLiteChannelId channel, float fDelay)',
+    'SetDDGLitePulsesPerExposure(AT_DDGLiteChannelId channel, at_u32 ui32Pulses)',
+    'SetDDGStepCoefficients(at_u32 mode, double p1, double p2)',
+    'SetDDGStepMode(at_u32 mode)',
+    'SetDDGTimes(double t0, double t1, double t2)',
+    'SetDDGTriggerMode(int mode)',
+    'SetDDGVariableGateStep(int mode, double p1, double p2)',
+    'SetDelayGenerator(int board, short address, int typ)',
+    'SetDMAParameters(int MaxImagesPerDMA, float SecondsPerDMA)',
+    'SetDriverEvent(HANDLE driverEvent)',
+    'SetEMAdvanced(int state)',
+    'SetEMCCDGain(int gain)',
+    'SetEMClockCompensation(int EMClockCompensationFlag)',
+    'SetEMGainMode(int mode)',
+    'SetExposureTime(float time)',
+    'SetExternalTriggerTermination(at_u32 uiTermination)',
+    'SetFanMode(int mode)',
+    'SetFastExtTrigger(int mode)',
+    'SetFastKinetics(int exposedRows, int seriesLength, float time, int mode, int hbin, int vbin)',
+    'SetFastKineticsEx(int exposedRows, int seriesLength, float time, int mode, int hbin, int vbin, int offset)',
+    'SetFilterMode(int mode)',
+    'SetFilterParameters(int width, float sensitivity, int range, float accept, int smooth, int noise)',
+    'SetFKVShiftSpeed(int index)',
+    'SetFPDP(int state)',
+    'SetFrameTransferMode(int mode)',
+    'SetFrontEndEvent(HANDLE driverEvent)',
+    'SetFullImage(int hbin, int vbin)',
+    'SetFVBHBin(int bin)',
+    'SetGain(int gain)',
+    'SetGate(float delay, float width, float stepRenamed)',
+    'SetGateMode(int gatemode)',
+    'SetHighCapacity(int state)',
+    'SetHorizontalSpeed(int index)',
+    'SetHSSpeed(int typ, int index)',
+    'SetImage(int hbin, int vbin, int hstart, int hend, int vstart, int vend)',
+    'SetImageFlip(int iHFlip, int iVFlip)',
+    'SetImageRotate(int iRotate)',
+    'SetIsolatedCropMode(int active, int cropheight, int cropwidth, int vbin, int hbin)',
+    'SetKineticCycleTime(float time)',
+    'SetMCPGain(int gain)',
+    'SetMCPGating(int gating)',
+    'SetMessageWindow(HWND wnd)',
+    'SetMetaData(int state)',
+    'SetMultiTrack(int number, int height, int offset, int * bottom, int * gap)',
+    'SetMultiTrackHBin(int bin)',
+    'SetMultiTrackHRange(int iStart, int iEnd)',
+    'SetMultiTrackScan(int trackHeight, int numberTracks, int iSIHStart, int iSIHEnd, int trackHBinning, int trackVBinning, int trackGap, int trackOffset, int trackSkip, int numberSubFrames)',
+    'SetNextAddress(at_32 * data, long lowAdd, long highAdd, long length, long physical)',
+    'SetNextAddress16(at_32 * data, long lowAdd, long highAdd, long length, long physical)',
+    'SetNumberAccumulations(int number)',
+    'SetNumberKinetics(int number)',
+    'SetNumberPrescans(int iNumber)',
+    'SetOutputAmplifier(int typ)',
+    'SetOverlapMode(int mode)',
+    'SetPCIMode(int mode, int value)',
+    'SetPhotonCounting(int state)',
+    'SetPhotonCountingThreshold(long min, long max)',
+    'SetPhosphorEvent(HANDLE driverEvent)',
+    'SetPhotonCountingDivisions(at_u32 noOfDivisions, at_32 * divisions)',
+    'SetPixelMode(int bitdepth, int colormode)',
+    'SetPreAmpGain(int index)',
+    'SetDualExposureTimes(float expTime1, float expTime2)',
+    'SetDualExposureMode(int mode)',
+    'SetRandomTracks(int numTracks, int * areas)',
+    'SetReadMode(int mode)',
+    'SetRegisterDump(int mode)',
+    'SetRingExposureTimes(int numTimes, float * times)',
+    'SetSaturationEvent(HANDLE saturationEvent)',
+    'SetShutter(int typ, int mode, int closingtime, int openingtime)',
+    'SetShutterEx(int typ, int mode, int closingtime, int openingtime, int extmode)',
+    'SetShutters(int typ, int mode, int closingtime, int openingtime, int exttype, int extmode, int dummy1, int dummy2)',
+    'SetSifComment(char * comment)',
+    'SetSingleTrack(int centre, int height)',
+    'SetSingleTrackHBin(int bin)',
+    'SetSpool(int active, int method, char * path, int framebuffersize)',
+    'SetSpoolThreadCount(int count)',
+    'SetStorageMode(long mode)',
+    'SetTECEvent(HANDLE driverEvent)',
+    'SetTemperature(int temperature)',
+    'SetTemperatureEvent(HANDLE temperatureEvent)',
+    'SetTriggerMode(int mode)',
+    'SetTriggerInvert(int mode)',
+    'GetTriggerLevelRange(float * minimum, float * maximum)',
+    'SetTriggerLevel(float f_level)',
+    'SetIODirection(int index, int iDirection)',
+    'SetIOLevel(int index, int iLevel)',
+    'SetUserEvent(HANDLE userEvent)',
+    'SetUSGenomics(long width, long height)',
+    'SetVerticalRowBuffer(int rows)',
+    'SetVerticalSpeed(int index)',
+    'SetVirtualChip(int state)',
+    'SetVSAmplitude(int index)',
+    'SetVSSpeed(int index)',
+    'ShutDown(void)',
+    'StartAcquisition(void)',
+    'UnMapPhysicalAddress(void)',
+    'WaitForAcquisition(void)',
+    'WaitForAcquisitionByHandle(long cameraHandle)',
+    'WaitForAcquisitionByHandleTimeOut(long cameraHandle, int iTimeOutMs)',
+    'WaitForAcquisitionTimeOut(int iTimeOutMs)',
+    'WhiteBalance(WORD * wRed, WORD * wGreen, WORD * wBlue, float * fRelR, float * fRelB, WhiteBalanceInfo * info)',
+    'OA_Initialize(const char * const pcFilename, unsigned int uiFileNameLen)',
+    'OA_EnableMode(const char * const pcModeName)',
+    'OA_GetModeAcqParams(const char * const pcModeName, char * const pcListOfParams)',
+    'OA_GetUserModeNames(char * pcListOfModes)',
+    'OA_GetPreSetModeNames(char * pcListOfModes)',
+    'OA_GetNumberOfUserModes(unsigned int * const puiNumberOfModes)',
+    'OA_GetNumberOfPreSetModes(unsigned int * const puiNumberOfModes)',
+    'OA_GetNumberOfAcqParams(const char * const pcModeName, unsigned int * const puiNumberOfParams)',
+    'OA_AddMode(char * pcModeName, unsigned int uiModeNameLen, char * pcModeDescription, unsigned int uiModeDescriptionLen)',
+    'OA_WriteToFile(const char * const pcFileName, unsigned int uiFileNameLen)',
+    'OA_DeleteMode(const char * const pcModeName, unsigned int uiModeNameLen)',
+    'OA_SetInt(const char * const pcModeName, const char * pcModeParam, const int iIntValue)',
+    'OA_SetFloat(const char * const pcModeName, const char * pcModeParam, const float fFloatValue)',
+    'OA_SetString(const char * const pcModeName, const char * pcModeParam, char * pcStringValue, const unsigned int uiStringLen)',
+    'OA_GetInt(const char * const pcModeName, const char * const pcModeParam, int * iIntValue)',
+    'OA_GetFloat(const char * const pcModeName, const char * const pcModeParam, float * fFloatValue)',
+    'OA_GetString(const char * const pcModeName, const char * const pcModeParam, char * pcStringValue, const unsigned int uiStringLen)',
+    'Filter_SetMode(unsigned int mode)',
+    'Filter_GetMode(unsigned int * mode)',
+    'Filter_SetThreshold(float threshold)',
+    'Filter_GetThreshold(float * threshold)',
+    'Filter_SetDataAveragingMode(int mode)',
+    'Filter_GetDataAveragingMode(int * mode)',
+    'Filter_SetAveragingFrameCount(int frames)',
+    'Filter_GetAveragingFrameCount(int * frames)',
+    'Filter_SetAveragingFactor(int averagingFactor)',
+    'Filter_GetAveragingFactor(int * averagingFactor)',
+    'PostProcessNoiseFilter(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iBaseline, int iMode, float fThreshold, int iHeight, int iWidth)',
+    'PostProcessCountConvert(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iNumImages, int iBaseline, int iMode, int iEmGain, float fQE, float fSensitivity, int iHeight, int iWidth)',
+    'PostProcessPhotonCounting(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iNumImages, int iNumframes, int iNumberOfThresholds, float * pfThreshold, int iHeight, int iWidth)',
+    'PostProcessDataAveraging(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iNumImages, int iAveragingFilterMode, int iHeight, int iWidth, int iFrameCount, int iAveragingFactor)',
+    ]
+
+## A reference to this module
+this = sys.modules[__name__]
+
+
+## types
+at_32 = c_long
+at_u32 = c_ulong
+at_64 = c_longlong
+at_u64 =  c_ulonglong
+
+from ctypes.wintypes import BYTE, WORD, DWORD, HANDLE, HWND
+from ctypes import c_ubyte, c_short
+
+class SYSTEMTIME(Structure):
+    _fields_ = [
+        ('wYear', WORD),
+        ('wMonth', WORD),
+        ('wDayOfWeek', WORD),
+        ('wDay', WORD),
+        ('wHour', WORD),
+        ('wMinute', WORD),
+        ('wSecond', WORD),
+        ('wMilliseconds', WORD),
+        ]
+
+
+_types = {
+    'int': c_int,
+    'long': c_long,
+    'u_int': c_uint,
+    'u_long': c_ulong,
+    'short': c_short,
+    'BYTE': BYTE,
+    'WORD': WORD,
+    'DWORD': DWORD,
+    'HANDLE': HANDLE,
+    'HWND': HWND,
+    'float': c_float,
+    'double': c_double,
+    'u_char': c_ubyte,
+    'at_32': at_32,
+    'at_u32': at_u32,
+    'at_64': at_64,
+    'at_u64': at_u64,
+    'ColorDemosaicInfo': ColorDemosaicInfo,
+    'AndorCapabilities': AndorCapabilities,
+    'AT_DDGLiteChannelId': AT_DDGLiteChannelId,
+    'AT_VersionInfoId': AT_VersionInfoId,
+    'WhiteBalanceInfo': WhiteBalanceInfo,
+    'SYSTEMTIME': SYSTEMTIME,
+}
+
+## Export DLL functions
+search = re.compile('(?P<func>.*)\((?P<args>.*)\)')
+for fndef in function_list:
+    # Split function definition into name and arguments.
+    match = search.search(fndef)
+    fnstr = match.group('func')
+    args = match.group('args').split(',')
+
+    # Export the DLL function from this module.
+    f = getattr(_dll, fnstr)
+    setattr(this, fnstr, f)
+    myf = getattr(this, fnstr)
+    
+    # Set the return type - always an int for these SDK functions.
+    myf.restype = c_int
+
+    # Set the types of the function arguments.
+    argtypes = []
+    is_pointer = False
+    for arg in args:
+        # We don't care about const.
+        arg = arg.replace('const ', '')
+        arg = arg.replace('unsigned ', 'u_')
+        is_pointer = '*' in arg
+        argtype = arg.split()[0]
+        if argtype == 'void':
+            pass
+        elif argtype == 'char' and is_pointer:
+            argtypes.append(c_char_p)
+        elif argtype in _types and is_pointer:
+            argtypes.append(ctypes.POINTER(_types[argtype]))
+        elif argtype in _types:
+            argtypes.append(_types[argtype])
+        else:
+            raise Exception('Type %s not handled.' % argtype)
+        myf.argtypes = tuple(argtypes)
+
+## We need a mapping to enable lookup of status codes to meaning.
+status_codes = {}
+for attrib_name in dir(this):
+    if attrib_name.startswith('DRV_'):
+        status_codes.update({eval(attrib_name): attrib_name})
+
+## The lookup function.
+def lookup_status(code):
+    key = code[0] if type(code) is list else code
+    if key in status_codes:
+        return status_codes[key]
+    else:
+        return "Unknown status code %s." % key
 
-Just export the functions - the calling code needs to ensure that the correct
-types are passed.  We could just export _dll and call _dll.func, but removing
-the _dll reduces the calling overhead."""
 
-#AbortAcquisition(void)
-AbortAcquisition = _dll.AbortAcquisition
-
-#CancelWait(void)
-CancelWait = _dll.CancelWait
-
-#CoolerOFF(void)
-CoolerOFF = _dll.CoolerOFF
-
-#CoolerON(void)
-CoolerON = _dll.CoolerON
-
-#DemosaicImage(WORD * grey, WORD * red, WORD * green, WORD * blue, ColorDemosaicInfo * info)
-DemosaicImage = _dll.DemosaicImage
-
-#EnableKeepCleans(int iMode)
-EnableKeepCleans = _dll.EnableKeepCleans
-
-#FreeInternalMemory(void)
-FreeInternalMemory = _dll.FreeInternalMemory
-
-#GetAcquiredData(at_32 * arr, unsigned long size)
-GetAcquiredData = _dll.GetAcquiredData
-
-#GetAcquiredData16(WORD * arr, unsigned long size)
-GetAcquiredData16 = _dll.GetAcquiredData16
-
-#GetAcquiredFloatData(float * arr, unsigned long size)
-GetAcquiredFloatData = _dll.GetAcquiredFloatData
-
-#GetAcquisitionProgress(long * acc, long * series)
-GetAcquisitionProgress = _dll.GetAcquisitionProgress
-
-#GetAcquisitionTimings(float * exposure, float * accumulate, float * kinetic)
-GetAcquisitionTimings = _dll.GetAcquisitionTimings
-
-#GetAdjustedRingExposureTimes(int inumTimes, float * fptimes)
-GetAdjustedRingExposureTimes = _dll.GetAdjustedRingExposureTimes
-
-#GetAllDMAData(at_32 * arr, unsigned long size)
-GetAllDMAData = _dll.GetAllDMAData
-
-#GetAmpDesc(int index, char * name, int length)
-GetAmpDesc = _dll.GetAmpDesc
-
-#GetAmpMaxSpeed(int index, float * speed)
-GetAmpMaxSpeed = _dll.GetAmpMaxSpeed
-
-#GetAvailableCameras(long * totalCameras)
-GetAvailableCameras = _dll.GetAvailableCameras
-
-#GetBackground(at_32 * arr, unsigned long size)
-GetBackground = _dll.GetBackground
-
-#GetBaselineClamp(int * state)
-GetBaselineClamp = _dll.GetBaselineClamp
-
-#GetBitDepth(int channel, int * depth)
-GetBitDepth = _dll.GetBitDepth
-
-#GetCameraEventStatus(DWORD * camStatus)
-GetCameraEventStatus = _dll.GetCameraEventStatus
-
-#GetCameraHandle(long cameraIndex, long * cameraHandle)
-GetCameraHandle = _dll.GetCameraHandle
-
-#GetCameraInformation(int index, long * information)
-GetCameraInformation = _dll.GetCameraInformation
-
-#GetCameraSerialNumber(int * number)
-GetCameraSerialNumber = _dll.GetCameraSerialNumber
-
-#GetCapabilities(AndorCapabilities * caps)
-GetCapabilities = _dll.GetCapabilities
-
-#GetControllerCardModel(char * controllerCardModel)
-GetControllerCardModel = _dll.GetControllerCardModel
-
-#GetCountConvertWavelengthRange(float * minval, float * maxval)
-GetCountConvertWavelengthRange = _dll.GetCountConvertWavelengthRange
-
-#GetCurrentCamera(long * cameraHandle)
-GetCurrentCamera = _dll.GetCurrentCamera
-
-#GetCYMGShift(int * iXshift, int * iYShift)
-GetCYMGShift = _dll.GetCYMGShift
-
-#GetDDGExternalOutputEnabled(at_u32 uiIndex, at_u32 * puiEnabled)
-GetDDGExternalOutputEnabled = _dll.GetDDGExternalOutputEnabled
-
-#GetDDGExternalOutputPolarity(at_u32 uiIndex, at_u32 * puiPolarity)
-GetDDGExternalOutputPolarity = _dll.GetDDGExternalOutputPolarity
-
-#GetDDGExternalOutputStepEnabled(at_u32 uiIndex, at_u32 * puiEnabled)
-GetDDGExternalOutputStepEnabled = _dll.GetDDGExternalOutputStepEnabled
-
-#GetDDGExternalOutputTime(at_u32 uiIndex, at_u64 * puiDelay, at_u64 * puiWidth)
-GetDDGExternalOutputTime = _dll.GetDDGExternalOutputTime
-
-#GetDDGTTLGateWidth(at_u64 opticalWidth, at_u64 * ttlWidth)
-GetDDGTTLGateWidth = _dll.GetDDGTTLGateWidth
-
-#GetDDGGateTime(at_u64 * puiDelay, at_u64 * puiWidth)
-GetDDGGateTime = _dll.GetDDGGateTime
-
-#GetDDGInsertionDelay(int * piState)
-GetDDGInsertionDelay = _dll.GetDDGInsertionDelay
-
-#GetDDGIntelligate(int * piState)
-GetDDGIntelligate = _dll.GetDDGIntelligate
-
-#GetDDGIOC(int * state)
-GetDDGIOC = _dll.GetDDGIOC
-
-#GetDDGIOCFrequency(double * frequency)
-GetDDGIOCFrequency = _dll.GetDDGIOCFrequency
-
-#GetDDGIOCNumber(unsigned long * numberPulses)
-GetDDGIOCNumber = _dll.GetDDGIOCNumber
-
-#GetDDGIOCNumberRequested(at_u32 * pulses)
-GetDDGIOCNumberRequested = _dll.GetDDGIOCNumberRequested
-
-#GetDDGIOCPeriod(at_u64 * period)
-GetDDGIOCPeriod = _dll.GetDDGIOCPeriod
-
-#GetDDGIOCPulses(int * pulses)
-GetDDGIOCPulses = _dll.GetDDGIOCPulses
-
-#GetDDGIOCTrigger(at_u32 * trigger)
-GetDDGIOCTrigger = _dll.GetDDGIOCTrigger
-
-#GetDDGOpticalWidthEnabled(at_u32 * puiEnabled)
-GetDDGOpticalWidthEnabled = _dll.GetDDGOpticalWidthEnabled
-
-#GetDDGLiteGlobalControlByte(unsigned char * control)
-GetDDGLiteGlobalControlByte = _dll.GetDDGLiteGlobalControlByte
-
-#GetDDGLiteControlByte(AT_DDGLiteChannelId channel, unsigned char * control)
-GetDDGLiteControlByte = _dll.GetDDGLiteControlByte
-
-#GetDDGLiteInitialDelay(AT_DDGLiteChannelId channel, float * fDelay)
-GetDDGLiteInitialDelay = _dll.GetDDGLiteInitialDelay
-
-#GetDDGLitePulseWidth(AT_DDGLiteChannelId channel, float * fWidth)
-GetDDGLitePulseWidth = _dll.GetDDGLitePulseWidth
-
-#GetDDGLiteInterPulseDelay(AT_DDGLiteChannelId channel, float * fDelay)
-GetDDGLiteInterPulseDelay = _dll.GetDDGLiteInterPulseDelay
-
-#GetDDGLitePulsesPerExposure(AT_DDGLiteChannelId channel, at_u32 * ui32Pulses)
-GetDDGLitePulsesPerExposure = _dll.GetDDGLitePulsesPerExposure
-
-#GetDDGPulse(double wid, double resolution, double * Delay, double * Width)
-GetDDGPulse = _dll.GetDDGPulse
-
-#GetDDGStepCoefficients(at_u32 mode, double * p1, double * p2)
-GetDDGStepCoefficients = _dll.GetDDGStepCoefficients
-
-#GetDDGStepMode(at_u32 * mode)
-GetDDGStepMode = _dll.GetDDGStepMode
-
-#GetDetector(int * xpixels, int * ypixels)
-GetDetector = _dll.GetDetector
-
-#GetDICameraInfo(void * info)
-GetDICameraInfo = _dll.GetDICameraInfo
-
-#GetEMAdvanced(int * state)
-GetEMAdvanced = _dll.GetEMAdvanced
-
-#GetEMCCDGain(int * gain)
-GetEMCCDGain = _dll.GetEMCCDGain
-
-#GetEMGainRange(int * low, int * high)
-GetEMGainRange = _dll.GetEMGainRange
-
-#GetExternalTriggerTermination(at_u32 * puiTermination)
-GetExternalTriggerTermination = _dll.GetExternalTriggerTermination
-
-#GetFastestRecommendedVSSpeed(int * index, float * speed)
-GetFastestRecommendedVSSpeed = _dll.GetFastestRecommendedVSSpeed
-
-#GetFIFOUsage(int * FIFOusage)
-GetFIFOUsage = _dll.GetFIFOUsage
-
-#GetFilterMode(int * mode)
-GetFilterMode = _dll.GetFilterMode
-
-#GetFKExposureTime(float * time)
-GetFKExposureTime = _dll.GetFKExposureTime
-
-#GetFKVShiftSpeed(int index, int * speed)
-GetFKVShiftSpeed = _dll.GetFKVShiftSpeed
-
-#GetFKVShiftSpeedF(int index, float * speed)
-GetFKVShiftSpeedF = _dll.GetFKVShiftSpeedF
-
-#GetFrontEndStatus(int * piFlag)
-GetFrontEndStatus = _dll.GetFrontEndStatus
-
-#GetGateMode(int * piGatemode)
-GetGateMode = _dll.GetGateMode
-
-#GetHardwareVersion(unsigned int * PCB, unsigned int * Decode, unsigned int * dummy1, unsigned int * dummy2, unsigned int * CameraFirmwareVersion, unsigned int * CameraFirmwareBuild)
-GetHardwareVersion = _dll.GetHardwareVersion
-
-#GetHeadModel(char * name)
-GetHeadModel = _dll.GetHeadModel
-
-#GetHorizontalSpeed(int index, int * speed)
-GetHorizontalSpeed = _dll.GetHorizontalSpeed
-
-#GetHSSpeed(int channel, int typ, int index, float * speed)
-GetHSSpeed = _dll.GetHSSpeed
-
-#GetHVflag(int * bFlag)
-GetHVflag = _dll.GetHVflag
-
-#GetID(int devNum, int * id)
-GetID = _dll.GetID
-
-#GetImageFlip(int * iHFlip, int * iVFlip)
-GetImageFlip = _dll.GetImageFlip
-
-#GetImageRotate(int * iRotate)
-GetImageRotate = _dll.GetImageRotate
-
-#GetImages(long first, long last, at_32 * arr, unsigned long size, long * validfirst, long * validlast)
-GetImages = _dll.GetImages
-
-#GetImages16(long first, long last, WORD * arr, unsigned long size, long * validfirst, long * validlast)
-GetImages16 = _dll.GetImages16
-
-#GetImagesPerDMA(unsigned long * images)
-GetImagesPerDMA = _dll.GetImagesPerDMA
-
-#GetIRQ(int * IRQ)
-GetIRQ = _dll.GetIRQ
-
-#GetKeepCleanTime(float * KeepCleanTime)
-GetKeepCleanTime = _dll.GetKeepCleanTime
-
-#GetMaximumBinning(int ReadMode, int HorzVert, int * MaxBinning)
-GetMaximumBinning = _dll.GetMaximumBinning
-
-#GetMaximumExposure(float * MaxExp)
-GetMaximumExposure = _dll.GetMaximumExposure
-
-#GetMCPGain(int * piGain)
-GetMCPGain = _dll.GetMCPGain
-
-#GetMCPGainRange(int * iLow, int * iHigh)
-GetMCPGainRange = _dll.GetMCPGainRange
-
-#GetMCPGainTable(int iNum, int * piGain, float * pfPhotoepc)
-GetMCPGainTable = _dll.GetMCPGainTable
-
-#GetMCPVoltage(int * iVoltage)
-GetMCPVoltage = _dll.GetMCPVoltage
-
-#GetMinimumImageLength(int * MinImageLength)
-GetMinimumImageLength = _dll.GetMinimumImageLength
-
-#GetMinimumNumberInSeries(int * number)
-GetMinimumNumberInSeries = _dll.GetMinimumNumberInSeries
-
-#GetMostRecentColorImage16(unsigned long size, int algorithm, WORD * red, WORD * green, WORD * blue)
-GetMostRecentColorImage16 = _dll.GetMostRecentColorImage16
-
-#GetMostRecentImage(at_32 * arr, unsigned long size)
-GetMostRecentImage = _dll.GetMostRecentImage
-
-#GetMostRecentImage16(WORD * arr, unsigned long size)
-GetMostRecentImage16 = _dll.GetMostRecentImage16
-
-#GetMSTimingsData(SYSTEMTIME * TimeOfStart, float * pfDifferences, int inoOfImages)
-GetMSTimingsData = _dll.GetMSTimingsData
-
-#GetMetaDataInfo(SYSTEMTIME * TimeOfStart, float * pfTimeFromStart, unsigned int index)
-GetMetaDataInfo = _dll.GetMetaDataInfo
-
-#GetMSTimingsEnabled(void)
-GetMSTimingsEnabled = _dll.GetMSTimingsEnabled
-
-#GetNewData(at_32 * arr, unsigned long size)
-GetNewData = _dll.GetNewData
-
-#GetNewData16(WORD * arr, unsigned long size)
-GetNewData16 = _dll.GetNewData16
-
-#GetNewData8(unsigned char * arr, unsigned long size)
-GetNewData8 = _dll.GetNewData8
-
-#GetNewFloatData(float * arr, unsigned long size)
-GetNewFloatData = _dll.GetNewFloatData
-
-#GetNumberADChannels(int * channels)
-GetNumberADChannels = _dll.GetNumberADChannels
-
-#GetNumberAmp(int * amp)
-GetNumberAmp = _dll.GetNumberAmp
-
-#GetNumberAvailableImages(at_32 * first, at_32 * last)
-GetNumberAvailableImages = _dll.GetNumberAvailableImages
-
-#GetNumberDDGExternalOutputs(at_u32 * puiCount)
-GetNumberDDGExternalOutputs = _dll.GetNumberDDGExternalOutputs
-
-#GetNumberDevices(int * numDevs)
-GetNumberDevices = _dll.GetNumberDevices
-
-#GetNumberFKVShiftSpeeds(int * number)
-GetNumberFKVShiftSpeeds = _dll.GetNumberFKVShiftSpeeds
-
-#GetNumberHorizontalSpeeds(int * number)
-GetNumberHorizontalSpeeds = _dll.GetNumberHorizontalSpeeds
-
-#GetNumberHSSpeeds(int channel, int typ, int * speeds)
-GetNumberHSSpeeds = _dll.GetNumberHSSpeeds
-
-#GetNumberNewImages(long * first, long * last)
-GetNumberNewImages = _dll.GetNumberNewImages
-
-#GetNumberPhotonCountingDivisions(at_u32 * noOfDivisions)
-GetNumberPhotonCountingDivisions = _dll.GetNumberPhotonCountingDivisions
-
-#GetNumberPreAmpGains(int * noGains)
-GetNumberPreAmpGains = _dll.GetNumberPreAmpGains
-
-#GetNumberRingExposureTimes(int * ipnumTimes)
-GetNumberRingExposureTimes = _dll.GetNumberRingExposureTimes
-
-#GetNumberIO(int * iNumber)
-GetNumberIO = _dll.GetNumberIO
-
-#GetNumberVerticalSpeeds(int * number)
-GetNumberVerticalSpeeds = _dll.GetNumberVerticalSpeeds
-
-#GetNumberVSAmplitudes(int * number)
-GetNumberVSAmplitudes = _dll.GetNumberVSAmplitudes
-
-#GetNumberVSSpeeds(int * speeds)
-GetNumberVSSpeeds = _dll.GetNumberVSSpeeds
-
-#GetOldestImage(at_32 * arr, unsigned long size)
-GetOldestImage = _dll.GetOldestImage
-
-#GetOldestImage16(WORD * arr, unsigned long size)
-GetOldestImage16 = _dll.GetOldestImage16
-
-#GetPhosphorStatus(int * piFlag)
-GetPhosphorStatus = _dll.GetPhosphorStatus
-
-#GetPhysicalDMAAddress(unsigned long * Address1, unsigned long * Address2)
-GetPhysicalDMAAddress = _dll.GetPhysicalDMAAddress
-
-#GetPixelSize(float * xSize, float * ySize)
-GetPixelSize = _dll.GetPixelSize
-
-#GetPreAmpGain(int index, float * gain)
-GetPreAmpGain = _dll.GetPreAmpGain
-
-#GetPreAmpGainText(int index, char * name, int length)
-GetPreAmpGainText = _dll.GetPreAmpGainText
-
-#GetDualExposureTimes(float * exposure1, float * exposure2)
-GetDualExposureTimes = _dll.GetDualExposureTimes
-
-#GetQE(char * sensor, float wavelength, unsigned int mode, float * QE)
-GetQE = _dll.GetQE
-
-#GetReadOutTime(float * ReadOutTime)
-GetReadOutTime = _dll.GetReadOutTime
-
-#GetRegisterDump(int * mode)
-GetRegisterDump = _dll.GetRegisterDump
-
-#GetRingExposureRange(float * fpMin, float * fpMax)
-GetRingExposureRange = _dll.GetRingExposureRange
-
-#GetSDK3Handle(int * Handle)
-GetSDK3Handle = _dll.GetSDK3Handle
-
-#GetSensitivity(int channel, int horzShift, int amplifier, int pa, float * sensitivity)
-GetSensitivity = _dll.GetSensitivity
-
-#GetShutterMinTimes(int * minclosingtime, int * minopeningtime)
-GetShutterMinTimes = _dll.GetShutterMinTimes
-
-#GetSizeOfCircularBuffer(long * index)
-GetSizeOfCircularBuffer = _dll.GetSizeOfCircularBuffer
-
-#GetSlotBusDeviceFunction(DWORD * dwslot, DWORD * dwBus, DWORD * dwDevice, DWORD * dwFunction)
-GetSlotBusDeviceFunction = _dll.GetSlotBusDeviceFunction
-
-#GetSoftwareVersion(unsigned int * eprom, unsigned int * coffile, unsigned int * vxdrev, unsigned int * vxdver, unsigned int * dllrev, unsigned int * dllver)
-GetSoftwareVersion = _dll.GetSoftwareVersion
-
-#GetSpoolProgress(long * index)
-GetSpoolProgress = _dll.GetSpoolProgress
-
-#GetStartUpTime(float * time)
-GetStartUpTime = _dll.GetStartUpTime
-
-#GetStatus(int * status)
-GetStatus = _dll.GetStatus
-
-#GetTECStatus(int * piFlag)
-GetTECStatus = _dll.GetTECStatus
-
-#GetTemperature(int * temperature)
-GetTemperature = _dll.GetTemperature
-
-#GetTemperatureF(float * temperature)
-GetTemperatureF = _dll.GetTemperatureF
-
-#GetTemperatureRange(int * mintemp, int * maxtemp)
-GetTemperatureRange = _dll.GetTemperatureRange
-
-#GetTemperatureStatus(float * SensorTemp, float * TargetTemp, float * AmbientTemp, float * CoolerVolts)
-GetTemperatureStatus = _dll.GetTemperatureStatus
-
-#GetTotalNumberImagesAcquired(long * index)
-GetTotalNumberImagesAcquired = _dll.GetTotalNumberImagesAcquired
-
-#GetIODirection(int index, int * iDirection)
-GetIODirection = _dll.GetIODirection
-
-#GetIOLevel(int index, int * iLevel)
-GetIOLevel = _dll.GetIOLevel
-
-#GetVersionInfo(AT_VersionInfoId arr, char * szVersionInfo, at_u32 ui32BufferLen)
-GetVersionInfo = _dll.GetVersionInfo
-
-#GetVerticalSpeed(int index, int * speed)
-GetVerticalSpeed = _dll.GetVerticalSpeed
-
-#GetVirtualDMAAddress(void ** Address1, void ** Address2)
-GetVirtualDMAAddress = _dll.GetVirtualDMAAddress
-
-#GetVSAmplitudeString(int index, char * text)
-GetVSAmplitudeString = _dll.GetVSAmplitudeString
-
-#GetVSAmplitudeFromString(char * text, int * index)
-GetVSAmplitudeFromString = _dll.GetVSAmplitudeFromString
-
-#GetVSAmplitudeValue(int index, int * value)
-GetVSAmplitudeValue = _dll.GetVSAmplitudeValue
-
-#GetVSSpeed(int index, float * speed)
-GetVSSpeed = _dll.GetVSSpeed
-
-#GPIBReceive(int id, short address, char * text, int size)
-GPIBReceive = _dll.GPIBReceive
-
-#GPIBSend(int id, short address, char * text)
-GPIBSend = _dll.GPIBSend
-
-#I2CBurstRead(BYTE i2cAddress, long nBytes, BYTE * data)
-I2CBurstRead = _dll.I2CBurstRead
-
-#I2CBurstWrite(BYTE i2cAddress, long nBytes, BYTE * data)
-I2CBurstWrite = _dll.I2CBurstWrite
-
-#I2CRead(BYTE deviceID, BYTE intAddress, BYTE * pdata)
-I2CRead = _dll.I2CRead
-
-#I2CReset(void)
-I2CReset = _dll.I2CReset
-
-#I2CWrite(BYTE deviceID, BYTE intAddress, BYTE data)
-I2CWrite = _dll.I2CWrite
-
-#IdAndorDll(void)
-IdAndorDll = _dll.IdAndorDll
-
-#InAuxPort(int port, int * state)
-InAuxPort = _dll.InAuxPort
-
-#Initialize(char * dir)
-Initialize = _dll.Initialize
-
-#InitializeDevice(char * dir)
-InitializeDevice = _dll.InitializeDevice
-
-#IsAmplifierAvailable(int iamp)
-IsAmplifierAvailable = _dll.IsAmplifierAvailable
-
-#IsCoolerOn(int * iCoolerStatus)
-IsCoolerOn = _dll.IsCoolerOn
-
-#IsCountConvertModeAvailable(int mode)
-IsCountConvertModeAvailable = _dll.IsCountConvertModeAvailable
-
-#IsInternalMechanicalShutter(int * InternalShutter)
-IsInternalMechanicalShutter = _dll.IsInternalMechanicalShutter
-
-#IsPreAmpGainAvailable(int channel, int amplifier, int index, int pa, int * status)
-IsPreAmpGainAvailable = _dll.IsPreAmpGainAvailable
-
-#IsTriggerModeAvailable(int iTriggerMode)
-IsTriggerModeAvailable = _dll.IsTriggerModeAvailable
-
-#Merge(const at_32 * arr, long nOrder, long nPoint, long nPixel, float * coeff, long fit, long hbin, at_32 * output, float * start, float * step_Renamed)
-Merge = _dll.Merge
-
-#OutAuxPort(int port, int state)
-OutAuxPort = _dll.OutAuxPort
-
-#PrepareAcquisition(void)
-PrepareAcquisition = _dll.PrepareAcquisition
-
-#SaveAsBmp(char * path, char * palette, long ymin, long ymax)
-SaveAsBmp = _dll.SaveAsBmp
-
-#SaveAsCommentedSif(char * path, char * comment)
-SaveAsCommentedSif = _dll.SaveAsCommentedSif
-
-#SaveAsEDF(char * szPath, int iMode)
-SaveAsEDF = _dll.SaveAsEDF
-
-#SaveAsFITS(char * szFileTitle, int typ)
-SaveAsFITS = _dll.SaveAsFITS
-
-#SaveAsRaw(char * szFileTitle, int typ)
-SaveAsRaw = _dll.SaveAsRaw
-
-#SaveAsSif(char * path)
-SaveAsSif = _dll.SaveAsSif
-
-#SaveAsSPC(char * path)
-SaveAsSPC = _dll.SaveAsSPC
-
-#SaveAsTiff(char * path, char * palette, int position, int typ)
-SaveAsTiff = _dll.SaveAsTiff
-
-#SaveAsTiffEx(char * path, char * palette, int position, int typ, int mode)
-SaveAsTiffEx = _dll.SaveAsTiffEx
-
-#SaveEEPROMToFile(char * cFileName)
-SaveEEPROMToFile = _dll.SaveEEPROMToFile
-
-#SaveToClipBoard(char * palette)
-SaveToClipBoard = _dll.SaveToClipBoard
-
-#SelectDevice(int devNum)
-SelectDevice = _dll.SelectDevice
-
-#SendSoftwareTrigger(void)
-SendSoftwareTrigger = _dll.SendSoftwareTrigger
-
-#SetAccumulationCycleTime(float time)
-SetAccumulationCycleTime = _dll.SetAccumulationCycleTime
-
-#SetAcqStatusEvent(HANDLE statusEvent)
-SetAcqStatusEvent = _dll.SetAcqStatusEvent
-
-#SetAcquisitionMode(int mode)
-SetAcquisitionMode = _dll.SetAcquisitionMode
-
-#SetAcquisitionType(int typ)
-SetAcquisitionType = _dll.SetAcquisitionType
-
-#SetADChannel(int channel)
-SetADChannel = _dll.SetADChannel
-
-#SetAdvancedTriggerModeState(int iState)
-SetAdvancedTriggerModeState = _dll.SetAdvancedTriggerModeState
-
-#SetBackground(at_32 * arr, unsigned long size)
-SetBackground = _dll.SetBackground
-
-#SetBaselineClamp(int state)
-SetBaselineClamp = _dll.SetBaselineClamp
-
-#SetBaselineOffset(int offset)
-SetBaselineOffset = _dll.SetBaselineOffset
-
-#SetCameraLinkMode(int mode)
-SetCameraLinkMode = _dll.SetCameraLinkMode
-
-#SetCameraStatusEnable(DWORD Enable)
-SetCameraStatusEnable = _dll.SetCameraStatusEnable
-
-#SetChargeShifting(unsigned int NumberRows, unsigned int NumberRepeats)
-SetChargeShifting = _dll.SetChargeShifting
-
-#SetComplexImage(int numAreas, int * areas)
-SetComplexImage = _dll.SetComplexImage
-
-#SetCoolerMode(int mode)
-SetCoolerMode = _dll.SetCoolerMode
-
-#SetCountConvertMode(int Mode)
-SetCountConvertMode = _dll.SetCountConvertMode
-
-#SetCountConvertWavelength(float wavelength)
-SetCountConvertWavelength = _dll.SetCountConvertWavelength
-
-#SetCropMode(int active, int cropHeight, int reserved)
-SetCropMode = _dll.SetCropMode
-
-#SetCurrentCamera(long cameraHandle)
-SetCurrentCamera = _dll.SetCurrentCamera
-
-#SetCustomTrackHBin(int bin)
-SetCustomTrackHBin = _dll.SetCustomTrackHBin
-
-#SetDataType(int typ)
-SetDataType = _dll.SetDataType
-
-#SetDACOutput(int iOption, int iResolution, int iValue)
-SetDACOutput = _dll.SetDACOutput
-
-#SetDACOutputScale(int iScale)
-SetDACOutputScale = _dll.SetDACOutputScale
-
-#SetDDGAddress(BYTE t0, BYTE t1, BYTE t2, BYTE t3, BYTE address)
-SetDDGAddress = _dll.SetDDGAddress
-
-#SetDDGExternalOutputEnabled(at_u32 uiIndex, at_u32 uiEnabled)
-SetDDGExternalOutputEnabled = _dll.SetDDGExternalOutputEnabled
-
-#SetDDGExternalOutputPolarity(at_u32 uiIndex, at_u32 uiPolarity)
-SetDDGExternalOutputPolarity = _dll.SetDDGExternalOutputPolarity
-
-#SetDDGExternalOutputStepEnabled(at_u32 uiIndex, at_u32 uiEnabled)
-SetDDGExternalOutputStepEnabled = _dll.SetDDGExternalOutputStepEnabled
-
-#SetDDGExternalOutputTime(at_u32 uiIndex, at_u64 uiDelay, at_u64 uiWidth)
-SetDDGExternalOutputTime = _dll.SetDDGExternalOutputTime
-
-#SetDDGGain(int gain)
-SetDDGGain = _dll.SetDDGGain
-
-#SetDDGGateStep(double step_Renamed)
-SetDDGGateStep = _dll.SetDDGGateStep
-
-#SetDDGGateTime(at_u64 uiDelay, at_u64 uiWidth)
-SetDDGGateTime = _dll.SetDDGGateTime
-
-#SetDDGInsertionDelay(int state)
-SetDDGInsertionDelay = _dll.SetDDGInsertionDelay
-
-#SetDDGIntelligate(int state)
-SetDDGIntelligate = _dll.SetDDGIntelligate
-
-#SetDDGIOC(int state)
-SetDDGIOC = _dll.SetDDGIOC
-
-#SetDDGIOCFrequency(double frequency)
-SetDDGIOCFrequency = _dll.SetDDGIOCFrequency
-
-#SetDDGIOCNumber(unsigned long numberPulses)
-SetDDGIOCNumber = _dll.SetDDGIOCNumber
-
-#SetDDGIOCPeriod(at_u64 period)
-SetDDGIOCPeriod = _dll.SetDDGIOCPeriod
-
-#SetDDGIOCTrigger(at_u32 trigger)
-SetDDGIOCTrigger = _dll.SetDDGIOCTrigger
-
-#SetDDGOpticalWidthEnabled(at_u32 uiEnabled)
-SetDDGOpticalWidthEnabled = _dll.SetDDGOpticalWidthEnabled
-
-#SetDDGLiteGlobalControlByte(unsigned char control)
-SetDDGLiteGlobalControlByte = _dll.SetDDGLiteGlobalControlByte
-
-#SetDDGLiteControlByte(AT_DDGLiteChannelId channel, unsigned char control)
-SetDDGLiteControlByte = _dll.SetDDGLiteControlByte
-
-#SetDDGLiteInitialDelay(AT_DDGLiteChannelId channel, float fDelay)
-SetDDGLiteInitialDelay = _dll.SetDDGLiteInitialDelay
-
-#SetDDGLitePulseWidth(AT_DDGLiteChannelId channel, float fWidth)
-SetDDGLitePulseWidth = _dll.SetDDGLitePulseWidth
-
-#SetDDGLiteInterPulseDelay(AT_DDGLiteChannelId channel, float fDelay)
-SetDDGLiteInterPulseDelay = _dll.SetDDGLiteInterPulseDelay
-
-#SetDDGLitePulsesPerExposure(AT_DDGLiteChannelId channel, at_u32 ui32Pulses)
-SetDDGLitePulsesPerExposure = _dll.SetDDGLitePulsesPerExposure
-
-#SetDDGStepCoefficients(at_u32 mode, double p1, double p2)
-SetDDGStepCoefficients = _dll.SetDDGStepCoefficients
-
-#SetDDGStepMode(at_u32 mode)
-SetDDGStepMode = _dll.SetDDGStepMode
-
-#SetDDGTimes(double t0, double t1, double t2)
-SetDDGTimes = _dll.SetDDGTimes
-
-#SetDDGTriggerMode(int mode)
-SetDDGTriggerMode = _dll.SetDDGTriggerMode
-
-#SetDDGVariableGateStep(int mode, double p1, double p2)
-SetDDGVariableGateStep = _dll.SetDDGVariableGateStep
-
-#SetDelayGenerator(int board, short address, int typ)
-SetDelayGenerator = _dll.SetDelayGenerator
-
-#SetDMAParameters(int MaxImagesPerDMA, float SecondsPerDMA)
-SetDMAParameters = _dll.SetDMAParameters
-
-#SetDriverEvent(HANDLE driverEvent)
-SetDriverEvent = _dll.SetDriverEvent
-
-#SetEMAdvanced(int state)
-SetEMAdvanced = _dll.SetEMAdvanced
-
-#SetEMCCDGain(int gain)
-SetEMCCDGain = _dll.SetEMCCDGain
-
-#SetEMClockCompensation(int EMClockCompensationFlag)
-SetEMClockCompensation = _dll.SetEMClockCompensation
-
-#SetEMGainMode(int mode)
-SetEMGainMode = _dll.SetEMGainMode
-
-#SetExposureTime(float time)
-SetExposureTime = _dll.SetExposureTime
-
-#SetExternalTriggerTermination(at_u32 uiTermination)
-SetExternalTriggerTermination = _dll.SetExternalTriggerTermination
-
-#SetFanMode(int mode)
-SetFanMode = _dll.SetFanMode
-
-#SetFastExtTrigger(int mode)
-SetFastExtTrigger = _dll.SetFastExtTrigger
-
-#SetFastKinetics(int exposedRows, int seriesLength, float time, int mode, int hbin, int vbin)
-SetFastKinetics = _dll.SetFastKinetics
-
-#SetFastKineticsEx(int exposedRows, int seriesLength, float time, int mode, int hbin, int vbin, int offset)
-SetFastKineticsEx = _dll.SetFastKineticsEx
-
-#SetFilterMode(int mode)
-SetFilterMode = _dll.SetFilterMode
-
-#SetFilterParameters(int width, float sensitivity, int range, float accept, int smooth, int noise)
-SetFilterParameters = _dll.SetFilterParameters
-
-#SetFKVShiftSpeed(int index)
-SetFKVShiftSpeed = _dll.SetFKVShiftSpeed
-
-#SetFPDP(int state)
-SetFPDP = _dll.SetFPDP
-
-#SetFrameTransferMode(int mode)
-SetFrameTransferMode = _dll.SetFrameTransferMode
-
-#SetFrontEndEvent(HANDLE driverEvent)
-SetFrontEndEvent = _dll.SetFrontEndEvent
-
-#SetFullImage(int hbin, int vbin)
-SetFullImage = _dll.SetFullImage
-
-#SetFVBHBin(int bin)
-SetFVBHBin = _dll.SetFVBHBin
-
-#SetGain(int gain)
-SetGain = _dll.SetGain
-
-#SetGate(float delay, float width, float stepRenamed)
-SetGate = _dll.SetGate
-
-#SetGateMode(int gatemode)
-SetGateMode = _dll.SetGateMode
-
-#SetHighCapacity(int state)
-SetHighCapacity = _dll.SetHighCapacity
-
-#SetHorizontalSpeed(int index)
-SetHorizontalSpeed = _dll.SetHorizontalSpeed
-
-#SetHSSpeed(int typ, int index)
-SetHSSpeed = _dll.SetHSSpeed
-
-#SetImage(int hbin, int vbin, int hstart, int hend, int vstart, int vend)
-SetImage = _dll.SetImage
-
-#SetImageFlip(int iHFlip, int iVFlip)
-SetImageFlip = _dll.SetImageFlip
-
-#SetImageRotate(int iRotate)
-SetImageRotate = _dll.SetImageRotate
-
-#SetIsolatedCropMode(int active, int cropheight, int cropwidth, int vbin, int hbin)
-SetIsolatedCropMode = _dll.SetIsolatedCropMode
-
-#SetKineticCycleTime(float time)
-SetKineticCycleTime = _dll.SetKineticCycleTime
-
-#SetMCPGain(int gain)
-SetMCPGain = _dll.SetMCPGain
-
-#SetMCPGating(int gating)
-SetMCPGating = _dll.SetMCPGating
-
-#SetMessageWindow(HWND wnd)
-SetMessageWindow = _dll.SetMessageWindow
-
-#SetMetaData(int state)
-SetMetaData = _dll.SetMetaData
-
-#SetMultiTrack(int number, int height, int offset, int * bottom, int * gap)
-SetMultiTrack = _dll.SetMultiTrack
-
-#SetMultiTrackHBin(int bin)
-SetMultiTrackHBin = _dll.SetMultiTrackHBin
-
-#SetMultiTrackHRange(int iStart, int iEnd)
-SetMultiTrackHRange = _dll.SetMultiTrackHRange
-
-#SetMultiTrackScan(int trackHeight, int numberTracks, int iSIHStart, int iSIHEnd, int trackHBinning, int trackVBinning, int trackGap, int trackOffset, int trackSkip, int numberSubFrames)
-SetMultiTrackScan = _dll.SetMultiTrackScan
-
-#SetNextAddress(at_32 * data, long lowAdd, long highAdd, long length, long physical)
-SetNextAddress = _dll.SetNextAddress
-
-#SetNextAddress16(at_32 * data, long lowAdd, long highAdd, long length, long physical)
-SetNextAddress16 = _dll.SetNextAddress16
-
-#SetNumberAccumulations(int number)
-SetNumberAccumulations = _dll.SetNumberAccumulations
-
-#SetNumberKinetics(int number)
-SetNumberKinetics = _dll.SetNumberKinetics
-
-#SetNumberPrescans(int iNumber)
-SetNumberPrescans = _dll.SetNumberPrescans
-
-#SetOutputAmplifier(int typ)
-SetOutputAmplifier = _dll.SetOutputAmplifier
-
-#SetOverlapMode(int mode)
-SetOverlapMode = _dll.SetOverlapMode
-
-#SetPCIMode(int mode, int value)
-SetPCIMode = _dll.SetPCIMode
-
-#SetPhotonCounting(int state)
-SetPhotonCounting = _dll.SetPhotonCounting
-
-#SetPhotonCountingThreshold(long min, long max)
-SetPhotonCountingThreshold = _dll.SetPhotonCountingThreshold
-
-#SetPhosphorEvent(HANDLE driverEvent)
-SetPhosphorEvent = _dll.SetPhosphorEvent
-
-#SetPhotonCountingDivisions(at_u32 noOfDivisions, at_32 * divisions)
-SetPhotonCountingDivisions = _dll.SetPhotonCountingDivisions
-
-#SetPixelMode(int bitdepth, int colormode)
-SetPixelMode = _dll.SetPixelMode
-
-#SetPreAmpGain(int index)
-SetPreAmpGain = _dll.SetPreAmpGain
-
-#SetDualExposureTimes(float expTime1, float expTime2)
-SetDualExposureTimes = _dll.SetDualExposureTimes
-
-#SetDualExposureMode(int mode)
-SetDualExposureMode = _dll.SetDualExposureMode
-
-#SetRandomTracks(int numTracks, int * areas)
-SetRandomTracks = _dll.SetRandomTracks
-
-#SetReadMode(int mode)
-SetReadMode = _dll.SetReadMode
-
-#SetRegisterDump(int mode)
-SetRegisterDump = _dll.SetRegisterDump
-
-#SetRingExposureTimes(int numTimes, float * times)
-SetRingExposureTimes = _dll.SetRingExposureTimes
-
-#SetSaturationEvent(HANDLE saturationEvent)
-SetSaturationEvent = _dll.SetSaturationEvent
-
-#SetShutter(int typ, int mode, int closingtime, int openingtime)
-SetShutter = _dll.SetShutter
-
-#SetShutterEx(int typ, int mode, int closingtime, int openingtime, int extmode)
-SetShutterEx = _dll.SetShutterEx
-
-#SetShutters(int typ, int mode, int closingtime, int openingtime, int exttype, int extmode, int dummy1, int dummy2)
-SetShutters = _dll.SetShutters
-
-#SetSifComment(char * comment)
-SetSifComment = _dll.SetSifComment
-
-#SetSingleTrack(int centre, int height)
-SetSingleTrack = _dll.SetSingleTrack
-
-#SetSingleTrackHBin(int bin)
-SetSingleTrackHBin = _dll.SetSingleTrackHBin
-
-#SetSpool(int active, int method, char * path, int framebuffersize)
-SetSpool = _dll.SetSpool
-
-#SetSpoolThreadCount(int count)
-SetSpoolThreadCount = _dll.SetSpoolThreadCount
-
-#SetStorageMode(long mode)
-SetStorageMode = _dll.SetStorageMode
-
-#SetTECEvent(HANDLE driverEvent)
-SetTECEvent = _dll.SetTECEvent
-
-#SetTemperature(int temperature)
-SetTemperature = _dll.SetTemperature
-
-#SetTemperatureEvent(HANDLE temperatureEvent)
-SetTemperatureEvent = _dll.SetTemperatureEvent
-
-#SetTriggerMode(int mode)
-SetTriggerMode = _dll.SetTriggerMode
-
-#SetTriggerInvert(int mode)
-SetTriggerInvert = _dll.SetTriggerInvert
-
-#GetTriggerLevelRange(float * minimum, float * maximum)
-GetTriggerLevelRange = _dll.GetTriggerLevelRange
-
-#SetTriggerLevel(float f_level)
-SetTriggerLevel = _dll.SetTriggerLevel
-
-#SetIODirection(int index, int iDirection)
-SetIODirection = _dll.SetIODirection
-
-#SetIOLevel(int index, int iLevel)
-SetIOLevel = _dll.SetIOLevel
-
-#SetUserEvent(HANDLE userEvent)
-SetUserEvent = _dll.SetUserEvent
-
-#SetUSGenomics(long width, long height)
-SetUSGenomics = _dll.SetUSGenomics
-
-#SetVerticalRowBuffer(int rows)
-SetVerticalRowBuffer = _dll.SetVerticalRowBuffer
-
-#SetVerticalSpeed(int index)
-SetVerticalSpeed = _dll.SetVerticalSpeed
-
-#SetVirtualChip(int state)
-SetVirtualChip = _dll.SetVirtualChip
-
-#SetVSAmplitude(int index)
-SetVSAmplitude = _dll.SetVSAmplitude
-
-#SetVSSpeed(int index)
-SetVSSpeed = _dll.SetVSSpeed
-
-#ShutDown(void)
-ShutDown = _dll.ShutDown
-
-#StartAcquisition(void)
-StartAcquisition = _dll.StartAcquisition
-
-#UnMapPhysicalAddress(void)
-UnMapPhysicalAddress = _dll.UnMapPhysicalAddress
-
-#WaitForAcquisition(void)
-WaitForAcquisition = _dll.WaitForAcquisition
-
-#WaitForAcquisitionByHandle(long cameraHandle)
-WaitForAcquisitionByHandle = _dll.WaitForAcquisitionByHandle
-
-#WaitForAcquisitionByHandleTimeOut(long cameraHandle, int iTimeOutMs)
-WaitForAcquisitionByHandleTimeOut = _dll.WaitForAcquisitionByHandleTimeOut
-
-#WaitForAcquisitionTimeOut(int iTimeOutMs)
-WaitForAcquisitionTimeOut = _dll.WaitForAcquisitionTimeOut
-
-#WhiteBalance(WORD * wRed, WORD * wGreen, WORD * wBlue, float * fRelR, float * fRelB, WhiteBalanceInfo * info)
-WhiteBalance = _dll.WhiteBalance
-
-#OA_Initialize(const char * const pcFilename, unsigned int uiFileNameLen)
-OA_Initialize = _dll.OA_Initialize
-
-#OA_EnableMode(const char * const pcModeName)
-OA_EnableMode = _dll.OA_EnableMode
-
-#OA_GetModeAcqParams(const char * const pcModeName, char * const pcListOfParams)
-OA_GetModeAcqParams = _dll.OA_GetModeAcqParams
-
-#OA_GetUserModeNames(char * pcListOfModes)
-OA_GetUserModeNames = _dll.OA_GetUserModeNames
-
-#OA_GetPreSetModeNames(char * pcListOfModes)
-OA_GetPreSetModeNames = _dll.OA_GetPreSetModeNames
-
-#OA_GetNumberOfUserModes(unsigned int * const puiNumberOfModes)
-OA_GetNumberOfUserModes = _dll.OA_GetNumberOfUserModes
-
-#OA_GetNumberOfPreSetModes(unsigned int * const puiNumberOfModes)
-OA_GetNumberOfPreSetModes = _dll.OA_GetNumberOfPreSetModes
-
-#OA_GetNumberOfAcqParams(const char * const pcModeName, unsigned int * const puiNumberOfParams)
-OA_GetNumberOfAcqParams = _dll.OA_GetNumberOfAcqParams
-
-#OA_AddMode(char * pcModeName, unsigned int uiModeNameLen, char * pcModeDescription, unsigned int uiModeDescriptionLen)
-OA_AddMode = _dll.OA_AddMode
-
-#OA_WriteToFile(const char * const pcFileName, unsigned int uiFileNameLen)
-OA_WriteToFile = _dll.OA_WriteToFile
-
-#OA_DeleteMode(const char * const pcModeName, unsigned int uiModeNameLen)
-OA_DeleteMode = _dll.OA_DeleteMode
-
-#OA_SetInt(const char * const pcModeName, const char * pcModeParam, const int iIntValue)
-OA_SetInt = _dll.OA_SetInt
-
-#OA_SetFloat(const char * const pcModeName, const char * pcModeParam, const float fFloatValue)
-OA_SetFloat = _dll.OA_SetFloat
-
-#OA_SetString(const char * const pcModeName, const char * pcModeParam, char * pcStringValue, const unsigned int uiStringLen)
-OA_SetString = _dll.OA_SetString
-
-#OA_GetInt(const char * const pcModeName, const char * const pcModeParam, int * iIntValue)
-OA_GetInt = _dll.OA_GetInt
-
-#OA_GetFloat(const char * const pcModeName, const char * const pcModeParam, float * fFloatValue)
-OA_GetFloat = _dll.OA_GetFloat
-
-#OA_GetString(const char * const pcModeName, const char * const pcModeParam, char * pcStringValue, const unsigned int uiStringLen)
-OA_GetString = _dll.OA_GetString
-
-#Filter_SetMode(unsigned int mode)
-Filter_SetMode = _dll.Filter_SetMode
-
-#Filter_GetMode(unsigned int * mode)
-Filter_GetMode = _dll.Filter_GetMode
-
-#Filter_SetThreshold(float threshold)
-Filter_SetThreshold = _dll.Filter_SetThreshold
-
-#Filter_GetThreshold(float * threshold)
-Filter_GetThreshold = _dll.Filter_GetThreshold
-
-#Filter_SetDataAveragingMode(int mode)
-Filter_SetDataAveragingMode = _dll.Filter_SetDataAveragingMode
-
-#Filter_GetDataAveragingMode(int * mode)
-Filter_GetDataAveragingMode = _dll.Filter_GetDataAveragingMode
-
-#Filter_SetAveragingFrameCount(int frames)
-Filter_SetAveragingFrameCount = _dll.Filter_SetAveragingFrameCount
-
-#Filter_GetAveragingFrameCount(int * frames)
-Filter_GetAveragingFrameCount = _dll.Filter_GetAveragingFrameCount
-
-#Filter_SetAveragingFactor(int averagingFactor)
-Filter_SetAveragingFactor = _dll.Filter_SetAveragingFactor
-
-#Filter_GetAveragingFactor(int * averagingFactor)
-Filter_GetAveragingFactor = _dll.Filter_GetAveragingFactor
-
-#PostProcessNoiseFilter(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iBaseline, int iMode, float fThreshold, int iHeight, int iWidth)
-PostProcessNoiseFilter = _dll.PostProcessNoiseFilter
-
-#PostProcessCountConvert(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iNumImages, int iBaseline, int iMode, int iEmGain, float fQE, float fSensitivity, int iHeight, int iWidth)
-PostProcessCountConvert - _dll.PostProcessCountConvert
-
-#PostProcessPhotonCounting(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iNumImages, int iNumframes, int iNumberOfThresholds, float * pfThreshold, int iHeight, int iWidth)
-PostProcessPhotonCounting = _dll.PostProcessPhotonCounting
-
-#PostProcessDataAveraging(at_32 * pInputImage, at_32 * pOutputImage, int iOutputBufferSize, int iNumImages, int iAveragingFilterMode, int iHeight, int iWidth, int iFrameCount, int iAveragingFactor)
-PostProcessDataAveraging = _dll.PostProcessDataAveraging
