@@ -1,11 +1,17 @@
-import os.path, re, sys, glob
-import ctypes
-import ctypes.util
-from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
-from ctypes import c_float, c_double, c_char, c_char_p
-from ctypes import Structure
+"""andorsdk - a ctypes interfae to Andor's SDK DLL.
 
-_dll = ctypes.WinDLL('atmcd64d.dll')
+This module defines constants, type and structures from the DLL header
+file.  It also exports functions form the DLL by using a list of function
+prototypes to generate callable module attributes, and setting appropriate
+restypes and argtype on those attributes."""
+import re, sys, functools
+from ctypes import Structure, WinDLL, POINTER
+from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
+from ctypes import c_ubyte, c_short, c_float, c_double, c_char, c_char_p
+from ctypes.wintypes import BYTE, WORD, DWORD, HANDLE, HWND
+
+
+_dll = WinDLL('atmcd64d.dll')
 
 """Version Information Definitions"""
 ## Version infomration enumeration
@@ -60,18 +66,18 @@ AT_GATEMODE_DDG           = 5
 """typedef structs"""
 class ANDORCAPS(Structure):
     _fields_ = [
-                ("ulSize", ctypes.c_ulong),
-                ("ulAcqModes", ctypes.c_ulong),
-                ("ulReadModes", ctypes.c_ulong),
-                ("ulTriggerModes", ctypes.c_ulong),
-                ("ulCameraType", ctypes.c_ulong),
-                ("ulPixelMode", ctypes.c_ulong),
-                ("ulSetFunctions", ctypes.c_ulong),
-                ("ulGetFunctions", ctypes.c_ulong),
-                ("ulFeatures", ctypes.c_ulong),
-                ("ulPCICard", ctypes.c_ulong),
-                ("ulEMGainCapability", ctypes.c_ulong),
-                ("ulFTReadModes", ctypes.c_ulong),
+                ("ulSize", c_ulong),
+                ("ulAcqModes", c_ulong),
+                ("ulReadModes", c_ulong),
+                ("ulTriggerModes", c_ulong),
+                ("ulCameraType", c_ulong),
+                ("ulPixelMode", c_ulong),
+                ("ulSetFunctions", c_ulong),
+                ("ulGetFunctions", c_ulong),
+                ("ulFeatures", c_ulong),
+                ("ulPCICard", c_ulong),
+                ("ulEMGainCapability", c_ulong),
+                ("ulFTReadModes", c_ulong),
                 ]
 
 
@@ -758,8 +764,7 @@ at_u32 = c_ulong
 at_64 = c_longlong
 at_u64 =  c_ulonglong
 
-from ctypes.wintypes import BYTE, WORD, DWORD, HANDLE, HWND
-from ctypes import c_ubyte, c_short
+
 
 class SYSTEMTIME(Structure):
     _fields_ = [
@@ -803,7 +808,6 @@ _types = {
 
 ## Function wrapper
 # Raise exceptions if returned status is not DRV_SUCCESS.
-import functools
 def sdk_wrapper(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -851,7 +855,7 @@ for fndef in function_list:
         elif argtype == 'char' and is_pointer:
             argtypes.append(c_char_p)
         elif argtype in _types and is_pointer:
-            argtypes.append(ctypes.POINTER(_types[argtype]))
+            argtypes.append(POINTER(_types[argtype]))
         elif argtype in _types:
             argtypes.append(_types[argtype])
         else:
