@@ -803,8 +803,9 @@ _types = {
 
 ## Function wrapper
 # Raise exceptions if returned status is not DRV_SUCCESS.
-
+import functools
 def sdk_wrapper(func):
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         try:
             status = func(*args, **kwargs)
@@ -818,6 +819,7 @@ def sdk_wrapper(func):
 
 
 ## Export DLL functions
+camerafuncs = []
 search = re.compile('(?P<func>.*)\((?P<args>.*)\)')
 for fndef in function_list:
     # Split function definition into name and arguments.
@@ -825,13 +827,15 @@ for fndef in function_list:
     fnstr = match.group('func')
     args = match.group('args').split(',')
 
-    # Export the DLL function from this module.
-    f = sdk_wrapper(getattr(_dll, fnstr))
-    setattr(this, fnstr, f)
-    myf = getattr(this, fnstr)
+    ## Export the DLL function from this module.
+    # We need a reference, f, to the unwrapped function for setting argtypes.
+    f = getattr(_dll, fnstr)
+    # Make the wrapped function an attribute of this module
+    setattr(this, fnstr, sdk_wrapper(f))
+    camerafuncs.append(sdk_wrapper(f))
     
     # Set the return type - always an int for these SDK functions.
-    myf.restype = c_int
+    f.restype = c_int
 
     # Set the types of the function arguments.
     argtypes = []
@@ -852,7 +856,7 @@ for fndef in function_list:
             argtypes.append(_types[argtype])
         else:
             raise Exception('Type %s not handled.' % argtype)
-        myf.argtypes = tuple(argtypes)
+        f.argtypes = tuple(argtypes)
 
 
 ## We need a mapping to enable lookup of status codes to meaning.
