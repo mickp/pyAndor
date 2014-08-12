@@ -2,10 +2,15 @@ import andorsdk as sdk
 import threading
 from ctypes import byref, c_float, c_int, c_long
 
+# do not edit! added by PythonBreakpoints
+from pdb import set_trace as _breakpoint
+
+
 dll_lock = threading.Lock()
 
 def with_lock(func):
         def wrapper(self, *args, **kwargs):
+            _breakpoint()  # d35fe60d
             had_lock_on_entry = self.has_lock
             
             try:
@@ -63,7 +68,6 @@ class Camera(object):
     def __init__(self, handle):
         self.handle = handle
         self.has_lock = False
-        self.is_initialized = False
         self.nx, self.ny = None, None
         self.caps = sdk.AndorCapabilities()
         self.read_mode = None
@@ -82,10 +86,7 @@ class Camera(object):
 
     @with_lock
     def initialize(self):
-        if not self.is_initialized:
-            if sdk.Initialize('') == sdk.DRV_SUCCESS:
-                self.is_initialized = True
-                self.get_capabilities()
+        return sdk.Initialize('') == sdk.DRV_SUCCESS:
 
 
     @with_lock
