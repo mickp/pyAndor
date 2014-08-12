@@ -800,6 +800,23 @@ _types = {
     'SYSTEMTIME': SYSTEMTIME,
 }
 
+
+## Function wrapper
+# Raise exceptions if returned status is not DRV_SUCCESS.
+
+def sdk_wrapper(func):
+    def wrapper(*args, **kwargs):
+        try:
+            status = func(*args, **kwargs)
+            if status != DRV_SUCCESS:
+                raise Exception("Andor DLL returned status %s:  %s." % (status, lookup_status(status)))
+            else:
+                return status
+        except:
+            raise
+    return wrapper
+
+
 ## Export DLL functions
 search = re.compile('(?P<func>.*)\((?P<args>.*)\)')
 for fndef in function_list:
@@ -809,7 +826,7 @@ for fndef in function_list:
     args = match.group('args').split(',')
 
     # Export the DLL function from this module.
-    f = getattr(_dll, fnstr)
+    f = sdk_wrapper(getattr(_dll, fnstr))
     setattr(this, fnstr, f)
     myf = getattr(this, fnstr)
     
@@ -836,6 +853,7 @@ for fndef in function_list:
         else:
             raise Exception('Type %s not handled.' % argtype)
         myf.argtypes = tuple(argtypes)
+
 
 ## We need a mapping to enable lookup of status codes to meaning.
 status_codes = {}
