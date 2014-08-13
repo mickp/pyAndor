@@ -9,6 +9,25 @@ from ctypes import byref, c_float, c_int, c_long, c_ulong
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
 
+##TODO
+# Methods Called from cockpit
+# abort()
+# cammode(is16bit, isConventional, speed, EMgain, None)
+# exposeTillAbort(bool)
+# getexp()
+# gettemp()
+# getTimesExpAccKin()
+# init
+# quit()
+# setdarkLRTB(int, int, int, int)
+# setExposureTime(int/float?)
+# setImage:     height, width = setImage(0, yOffset, None, height)
+# setskipLRTB:  imagesize = setskipLRTB(left, right, top, bottom)
+# setshutter(int)
+# settemp(int)
+# settrigger(bool)
+# start(isIxonPlus)
+
 
 def with_camera(func):
     """A decorator for camera functions.
