@@ -1,11 +1,20 @@
+"""A module for control of Andor cameras via the Andor SDK.
+
+This module defines the Camera class for Andor cameras."""
 import andorsdk as sdk
+import functools
 import threading
 from ctypes import byref, c_float, c_int, c_long, c_ulong
-import functools
 
+## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
 
+
 def with_camera(func):
+    """A decorator for camera functions.
+
+    This decorator obtains a lock on the DLL and calls SetCurrentCamera
+    to ensure that the library acts on the correct piece of hardware."""
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):   
         had_lock_on_entry = self.has_lock
@@ -29,7 +38,9 @@ def with_camera(func):
 
 
 def sdk_call(func):
-    ## Simply passes args to func, without self.
+    """A decorator for DLL functions called as methods of Camera.
+
+    This decorator simply passes args to func, without self."""
     @functools.wraps(func)
     def sdk_wrapper(self, *args, **kwargs):
         try:
@@ -40,7 +51,7 @@ def sdk_call(func):
 
 
 class CameraMeta(type):
-    """Metaclass that adds DLL methods to the Camera class.
+    """A metaclass that adds DLL methods to the Camera class.
 
     Methods from the SDK DLL are wrapped by 'sdk_call' to remove 'self' from
     the args, then by 'with_camera' so that
@@ -59,6 +70,8 @@ class Camera(object):
     
     All instance methods should be decorated with @with_camera: this obtains a
     lock on the DLL, and sets the target camera for DLL methods."""
+
+    # Use the CameraMeta class to add DLL methods to this class.
     __metaclass__ = CameraMeta
     # Map handle values to camera instances
     handle_to_camera = {}
@@ -68,11 +81,12 @@ class Camera(object):
 
     @classmethod
     def update_cameras(cls):      
-        cameras = cls.cameras
-        handle_to_camera = cls.handle_to_camera
+        """Search for cameras and create Camera instances.
 
-        for cam in cameras:
-            cameras.remove(cam)
+        Camera instances are tracked in the class variables 
+        Camera.cameralist and Camera.handle_to_camera."""
+        for cam in cls.cameras:
+            cls.cameras.remove(cam)
 
         num_cameras = c_long()
         sdk.GetAvailableCameras(byref(num_cameras))
@@ -80,11 +94,12 @@ class Camera(object):
         for i in range(num_cameras.value):
             handle = c_long()
             sdk.GetCameraHandle(i, byref(handle))
-            cameras.append(Camera(handle))
-            handle_to_camera.update({handle.value: i})
+            cls.cameras.append(Camera(handle))
+            cls.handle_to_camera.update({handle.value: i})
 
 
     def __init__(self, handle):
+        """Init a Camera instance for hardware with ID=handle."""
         self.handle = handle
         self.has_lock = False
         self.nx, self.ny = None, None
@@ -93,14 +108,16 @@ class Camera(object):
         self.vs_speed = None
 
 
+    @with_camera
     def prepare(self):
+        """Prepare the camera for data acquisition."""
         self.get_detector()
         self.GetCapabilities(self.caps)
 
 
-
     @with_camera
     def get_detector(self):
+        """Populate nx and ny with the detector geometry."""
         nx, ny = c_int(), c_int()
         self.GetDetector(byref(nx), byref(ny))
         self.nx = nx.value
