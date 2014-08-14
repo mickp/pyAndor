@@ -809,6 +809,14 @@ _types = {
 }
 
 
+## An exeption class
+class AndorException(Exception):
+    def __init__(self, status):
+        message = "Andor DLL returned status %s:  %s." % (status, lookup_status(status))
+        Exception.__init__(self, message)
+        self.status = status
+
+
 ## Function wrapper
 # Raise exceptions if returned status is not DRV_SUCCESS.
 def sdk_wrapper(func):
@@ -816,10 +824,12 @@ def sdk_wrapper(func):
     def wrapper(*args, **kwargs):
         try:
             status = func(*args, **kwargs)
-            if status != DRV_SUCCESS:
-                raise Exception("Andor DLL returned status %s:  %s." % (status, lookup_status(status)))
-            else:
+            if status == DRV_SUCCESS:
                 return status
+            elif status == DRV_IDLE:
+                return status
+            else:
+                raise AndorException(status)
         except:
             raise
     return wrapper
