@@ -6,6 +6,7 @@ import functools
 import sys
 import threading
 from ctypes import byref, c_float, c_int, c_long, c_ulong
+from ctypes import create_string_buffer
 
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
@@ -137,20 +138,98 @@ class Camera(object):
 
 
     @with_camera
+    def abort(self):
+        self.AbortAcquisition()
+
+
+    @with_camera
     def prepare(self):
         """Prepare the camera for data acquisition."""
         self.get_detector()
-        self.GetCapabilities(self.caps)
+        self.get_capabilities()
+
+
+    @with_camera
+    def get_acquisition_timings(self):
+        exposure = c_float()
+        accumulate = c_float()
+        kinetic = c_float()
+        sdk.GetAcquisitionTimings(exposure, accumulate, kinetic)
+        return (exposure, accumulate, kinetic)
+
+
+    @with_camera
+    def get_amp_desc(self, index):
+        chars =  create_string_buffer(128)
+        sdk.GetAmpDesc(index, s, len(s))
+        return s.value
+
+
+    @with_camera
+    def get_camera_serial_number(self):
+        sn = c_int()
+        sdk.GetCameraSerialNumber(sn)
+        return sn.value
+
+
+    @with_camera
+    def get_capabilities(self):
+        sdk.GetCapabilities(self.caps)
 
 
     @with_camera
     def get_detector(self):
         """Populate nx and ny with the detector geometry."""
         nx, ny = c_int(), c_int()
-        self.GetDetector(byref(nx), byref(ny))
+        sdk.GetDetector(byref(nx), byref(ny))
         self.nx = nx.value
         self.ny = ny.value
         return (self.nx, self.ny)
+
+
+    @with_camera
+    def get_em_advanced(self):
+        state = c_int()
+        sdk.GetEMAdvanced(state)
+        return state.value
+
+
+    @with_camera
+    def get_emccd_gain(self):
+        gain = c_int()
+        sdk.GetEMCCDGain(gain)
+        return gain.value
+
+
+    @with_camera
+    def get_em_gain_range(self):
+        low = c_int()
+        high = c_int()
+        sdk.GetEMGainRange(low, high)
+        return (low.value, high.value)
+
+
+    @with_camera
+    def get_fk_exposure_time(self):
+        t = c_float()
+        sdk.GetFKExposureTime(t)
+        return t.value
+
+
+    @with_camera
+    def get_fk_v_shift_speed_f(self, index):
+        speed = c_float()
+        sdk.GetFKVShiftSpeedF(index, speed)
+        return speed.value
+
+
+    @with_camera
+    def get_fastest_recommended_vs_speed(self):
+        index = c_int()
+        speed = c_float()
+        sdk.GetFastestRecommendedVSSpeed(index, speed)
+        self.vs_speed = speed.value
+        return (index.value, speed.value)
 
 
     @with_camera
@@ -158,18 +237,9 @@ class Camera(object):
         pcb, decode, dummy1, dummy2, version, build = 6 * [c_ulong()]
         plist = [pcb, decode, dummy1, dummy2, version, build]
         parameters = [byref(p) for p in plist]
-        self.GetHardwareVersion(*parameters)
+        sdk.GetHardwareVersion(*parameters)
         result = [p.value for p in plist]
         return result
-
-
-    @with_camera
-    def get_fastest_recommended_vs_speed(self):
-        index = c_int()
-        speed = c_float()
-        self.GetFastestRecommendedVSSpeed(index, speed)
-        self.vs_speed = speed.value
-        return (index.value, speed.value)
 
 
     @with_camera
@@ -181,27 +251,3 @@ class Camera(object):
                                   int(gain),
                                   status)
         return status.value
-
-
-    """Legacy functions, called from cockpit."""
-
-    @with_camera
-    def abort(self):
-        self.AbortAcquisition()
-        
-        
-# cammode(is16bit, isConventional, speed, EMgain, None)
-# exposeTillAbort(bool)
-# getexp()
-# gettemp()
-# getTimesExpAccKin()
-# init
-# quit()
-# setdarkLRTB(int, int, int, int)
-# setExposureTime(int/float?)
-# setImage:     height, width = setImage(0, yOffset, None, height)
-# setskipLRTB:  imagesize = setskipLRTB(left, right, top, bottom)
-# setshutter(int)
-# settemp(int)
-# settrigger(bool)
-# start(isIxonPlus)
