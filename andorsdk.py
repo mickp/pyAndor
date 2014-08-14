@@ -3,7 +3,10 @@
 This module defines constants, type and structures from the DLL header
 file.  It also exports functions form the DLL by using a list of function
 prototypes to generate callable module attributes, and setting appropriate
-restypes and argtype on those attributes."""
+restypes and argtype on those attributes.
+
+When called by concurrent processes, SetCurrentCamera sets the camera only
+for the calling process - not all running processes."""
 import re, sys, functools
 from ctypes import Structure, WinDLL, POINTER
 from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
