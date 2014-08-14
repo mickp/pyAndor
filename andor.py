@@ -3,6 +3,7 @@
 This module defines the Camera class for Andor cameras."""
 import andorsdk as sdk
 import functools
+import sys
 import threading
 from ctypes import byref, c_float, c_int, c_long, c_ulong
 
@@ -37,22 +38,22 @@ def with_camera(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):   
         had_lock_on_entry = self.has_lock
+        if not had_lock_on_entry:
+            dll_lock.acquire()
+            self.has_lock = True
         try:
-            if not had_lock_on_entry:
-                dll_lock.acquire()
-                self.has_lock = True
-                sdk.SetCurrentCamera(self.handle)
-                result = func(self, *args, **kwargs)
-                dll_lock.release()
-                self.has_lock = False
-            else: # already had lock
-                result = func(self, *args, **kwargs)
-            return result
+            sdk.SetCurrentCamera(self.handle)
+            result = func(self, *args, **kwargs)
         except:
             if dll_lock.locked():  
                 dll_lock.release()
-            self.has_lock = False
+                self.has_lock = False
             raise
+
+        if dll_lock.locked() and not had_lock_on_entry:
+            dll_lock.release()
+            self.has_lock = False
+        return result
     return wrapper
 
 
@@ -67,6 +68,37 @@ def sdk_call(func):
         except:
             raise
     return sdk_wrapper
+
+
+class CameraManager(object):
+    """A class to manage Camera instances.
+
+    This used to be handled by class variables and class methods, but
+    that approach will not work when we need to spread several cameras
+    over separate processes."""
+    def __init__(self):
+        # Map handle values to camera instances
+        self.handle_to_camera = {}
+        # A list of camera instances
+        self.cameras = []
+
+
+    def update_cameras(self):
+        """Search for cameras and create Camera instances.
+
+        Camera instances are tracked in the class variables
+        Camera.cameralist and Camera.handle_to_camera."""
+        for cam in self.cameras:
+            self.cameras.remove(cam)
+
+        num_cameras = c_long()
+        sdk.GetAvailableCameras(byref(num_cameras))
+
+        for i in range(num_cameras.value):
+            handle = c_long()
+            sdk.GetCameraHandle(i, byref(handle))
+            self.cameras.append(Camera(handle))
+            self.handle_to_camera.update({handle.value: i})
 
 
 class CameraMeta(type):
@@ -92,29 +124,6 @@ class Camera(object):
 
     # Use the CameraMeta class to add DLL methods to this class.
     __metaclass__ = CameraMeta
-    # Map handle values to camera instances
-    handle_to_camera = {}
-    # A list of camera instances
-    cameras = []
-
-
-    @classmethod
-    def update_cameras(cls):      
-        """Search for cameras and create Camera instances.
-
-        Camera instances are tracked in the class variables 
-        Camera.cameralist and Camera.handle_to_camera."""
-        for cam in cls.cameras:
-            cls.cameras.remove(cam)
-
-        num_cameras = c_long()
-        sdk.GetAvailableCameras(byref(num_cameras))
-
-        for i in range(num_cameras.value):
-            handle = c_long()
-            sdk.GetCameraHandle(i, byref(handle))
-            cls.cameras.append(Camera(handle))
-            cls.handle_to_camera.update({handle.value: i})
 
 
     def __init__(self, handle):
@@ -172,3 +181,27 @@ class Camera(object):
                                   int(gain),
                                   status)
         return status.value
+
+
+    """Legacy functions, called from cockpit."""
+
+    @with_camera
+    def abort(self):
+        self.AbortAcquisition()
+        
+        
+# cammode(is16bit, isConventional, speed, EMgain, None)
+# exposeTillAbort(bool)
+# getexp()
+# gettemp()
+# getTimesExpAccKin()
+# init
+# quit()
+# setdarkLRTB(int, int, int, int)
+# setExposureTime(int/float?)
+# setImage:     height, width = setImage(0, yOffset, None, height)
+# setskipLRTB:  imagesize = setskipLRTB(left, right, top, bottom)
+# setshutter(int)
+# settemp(int)
+# settrigger(bool)
+# start(isIxonPlus)
