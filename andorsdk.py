@@ -815,10 +815,15 @@ def sdk_wrapper(func):
     def wrapper(*args, **kwargs):
         try:
             status = func(*args, **kwargs)
+            # Return args on success or idle.
             if status == DRV_SUCCESS:
                 return args
             elif status == DRV_IDLE:
                 return args
+            # Return temperature status codes.
+            elif status in range(DRV_TEMP_CODES, DRV_GENERAL_ERRORS):
+                return status
+            # Otherwise raise an error.
             else:
                 msg = "Andor function %s returned status %s:  %s." % (
                     func.__name__, status, lookup_status(status))
