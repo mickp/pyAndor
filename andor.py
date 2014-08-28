@@ -1,7 +1,27 @@
 """A module for control of Andor cameras via the Andor SDK.
 
-This module defines the Camera class for Andor cameras.
+Call from the command line to spawn Pyro objects in separate
+processes.
+Alternatively, import CameraManager for multiple cameras in one
+process.This module defines the Camera class for Andor cameras.
+
+=== Interesting features of the Andor SDK. ===
+The DLL relies on runtime-generated handles to access specific cameras. The
+handles appear to be generated when there is a call to GetCameraHandle or
+Initialize.
+
+The handle for a given camera is not necessarily the same from one process to
+the next, which means we need to rely on the camera serial number. However,
+it is not possible to sucessfully call GetCameraSerialNumber until
+Initialize('') has been completed. Once Initialize has been called in one
+process, it grabs the CurrentCamera: subsequent calls to Initialize in
+processes that have the same CurrentCamera will fail, unless the original
+process made an explicit call to ShutDown.
+
+So we can't spawn a process then select a known camera:  we have to blindly
+pick a different camera for each process and run with what it gets.
 """
+
 import andorsdk as sdk
 import functools
 import Pyro4
@@ -10,6 +30,7 @@ import threading
 from ctypes import byref, c_float, c_int, c_long, c_ulong
 from ctypes import create_string_buffer
 from multiprocessing import Process
+import atexit
 
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
@@ -38,11 +59,11 @@ def with_camera(func):
     """A decorator for camera functions.
 
     If there are multiple cameras per process, this decorator obtains a lock
-    on the DLL and calls SetCurrentCamera to ensure that the library acts on 
+    on the DLL and calls SetCurrentCamera to ensure that the library acts on
     the correct piece of hardware.
     """
     @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):   
+    def wrapper(self, *args, **kwargs):
         if not self.singleton:
             # There may be > 1 cameras per process, so lock the DLL
             had_lock_on_entry = self.has_lock
@@ -53,18 +74,18 @@ def with_camera(func):
                 sdk.SetCurrentCamera(self.handle)
                 result = func(self, *args, **kwargs)
             except:
-                if dll_lock.locked():  
+                if dll_lock.locked():
                     dll_lock.release()
                     self.has_lock = False
                 raise
             if dll_lock.locked() and not had_lock_on_entry:
                 dll_lock.release()
                 self.has_lock = False
-            
+
         else:
             # There is only 1 camera per process - no locks required.
             result = func(self, *args, **kwargs)
-        
+
         return result
     return wrapper
 
@@ -118,30 +139,17 @@ class CameraManager(object):
             self.handle_to_camera.update({handle.value: i})
 
 
-"""Interesting features of the Andor SDK.
-
-The DLL relies on runtime-generated handles to access specific cameras.
-The handles appear to be generated when there is a call to
-GetCameraHandle or Initialize.  The handle for a given camera is not
-necessarily the same from one process to the next, which means we need
-to rely on the camera serial number.
-However, it is not possible to sucessfully call GetCameraSerialNumber until
-Initialize('') has been completed.
-Once Initialize has been called in one process, it grabs the CurrentCamera:
-subsequent calls to Initialize in processes that have the same CurrentCamera
-will fail.
-
-So we can't spawn a process then select a known camera:  we have to blindly
-pick a different camera for each process and run with what it gets.
-"""
 class CameraServer(Process):
+    """A class to serve Camera objects over Pyro."""
     def __init__(self, index):
         super(CameraServer, self).__init__()
+        self.daemon = True
         self.index = index
         #TODO - should read serial_to_* from config file.
         self.serial_to_host = {9145: '127.0.0.1', 9146: '127.0.0.1'}
         self.serial_to_port = {9145: 7776, 9146: 7777}
         self.cam = None
+
 
     def run(self):
         self.serve()
@@ -150,10 +158,10 @@ class CameraServer(Process):
     def serve(self):
         ## This works for each camera ... once.  If a process is terminated
         # then you try and create a new process for the same camera, the SDK
-        # will not allow you to Initialize.  
-        
+        # will not allow you to Initialize.
+
         # TODO: I think we may need to call Shutdown before the process exits ...
-        # but Proces    s.terminate kills is right away, so we probaly need to
+        # but Process.terminate kills it right away, so we probaly need to
         # stop the Pyro Daemon, then call Shutdown, then return / join the main
         # process.
         serial = c_long()
@@ -166,13 +174,13 @@ class CameraServer(Process):
                                 self.index, num_cameras.value))
 
         sdk.GetCameraHandle(self.index, handle)
-        
+
         # SetCurrentCamera once, and create Camera with singleton=True:
         # this is the only camera in this process, so we don't need to
-        # SetCurrentCamera and lock for every Camera method.
+        # SetCurrentCamera and lock for each Camera method.
         sdk.SetCurrentCamera(handle)
-        self.cam = Camera(handle, singleton=True)
 
+        self.cam = Camera(handle, singleton=True)
         self.cam.Initialize('')
         self.cam.GetCameraSerialNumber(serial)
 
@@ -181,7 +189,7 @@ class CameraServer(Process):
 
         if not self.serial_to_port.has_key(serial.value):
             raise Exception("No host found for camera with serial number %s." % serial.value)
-    
+
         host = self.serial_to_host[serial.value]
         port = self.serial_to_port[serial.value]
         daemon = Pyro4.Daemon(port=port, host=host)
@@ -207,13 +215,29 @@ class CameraMeta(type):
 
 class Camera(object):
     """Camera class for Andor cameras.
-    
+
     All instance methods should be decorated with @with_camera: this obtains a
     lock on the DLL, and sets the target camera for DLL methods.
     """
-
     # Use the CameraMeta class to add DLL methods to this class.
     __metaclass__ = CameraMeta
+
+
+    def __enter__(self):
+        """Context-manager entry."""
+        return self
+
+
+    @with_camera
+    def __exit__(self, type, value, traceback):
+        """Context-manager exit - call ShutDown to free camera."""
+        ## Shut down the camera.
+        print "Shutting down camera with handle %s." % self.handle
+        try:
+            self.ShutDown()
+        except:
+            # May raise exception if camera never initialized - not a problem.
+            pass
 
 
     def __init__(self, handle, singleton=False):
@@ -410,9 +434,9 @@ class Camera(object):
     @with_camera
     def is_preamp_gain_available(self, channel, amplifier, index, gain):
         status = c_int()
-        sdk.IsPreAmpGainAvailable(int(channel), 
-                                  int(amplifier), 
-                                  int(index), 
+        sdk.IsPreAmpGainAvailable(int(channel),
+                                  int(amplifier),
+                                  int(index),
                                   int(gain),
                                   status)
         return status.value
@@ -446,3 +470,28 @@ class Camera(object):
         (index, speed) = self.get_fastest_recommended_vs_speed
         self.SetVSSpeed(int(index))
         return speed
+
+if __name__ == '__main__':
+    """ If called from the command line, create CameraServers.
+
+    There will be a delay while the dll initializes each camera:  it does
+    not seem able to do concurrent initializations, even in separate
+    processes.  Hopefully, this will prevent any delay each time we connect
+    to the camera from cockpit.
+    """
+    from time import sleep
+    num_cameras = c_long()
+    sdk.GetAvailableCameras(num_cameras)
+
+    children = []
+    for i in range(num_cameras.value):
+        print "Starting service %d of %d." % (i + 1, num_cameras.value)
+        children.append(CameraServer(i))
+        children[i].start()
+
+    try:
+        while True:
+            sleep(1)
+    finally:
+        for c in children:
+            c.terminate()
