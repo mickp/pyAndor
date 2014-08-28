@@ -24,18 +24,25 @@ pick a different camera for each process and run with what it gets.
 
 import andorsdk as sdk
 import functools
+import numpy
 import Pyro4
 import sys
 import threading
+import time
+import weakref
 from ctypes import byref, c_float, c_int, c_long, c_ulong
 from ctypes import create_string_buffer
 from multiprocessing import Process
-import atexit
 
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
 
 ##TODO
+# Triggering
+# Prepare for single frame capture in interactive mode.
+# Prepare for many captures in video mode (capture 'til abort?).
+# Prepare for experiments.
+#
 # Methods Called from cockpit
 # abort()
 # cammode(is16bit, isConventional, speed, EMgain, None)
@@ -250,14 +257,12 @@ class Camera(object):
         self.nx, self.ny = None, None
         # Detector capabilties.
         self.caps = sdk.AndorCapabilities()
-        # Readout mode.
-        self.read_mode = None
-        # Vertical shift speed.
-        self.vs_speed = None
         # Is this the only camera in this process?
         self.singleton = singleton
-        # Is the camera enabled.
+        # Is the camera enabled?
         self.enabled = False
+        # Is the camera ready?
+        self.ready = False
         # Temperature min. and max. possible values.
         self.t_min = c_int()
         self.t_max = c_int()
@@ -265,11 +270,15 @@ class Camera(object):
         self.t_set_point = c_int()
         self.t_threshold = 2
         self.t_state = None
+        # Thread to handle data on exposure
+        self.data_thread = None
 
 
+    ### Client functions. ###
     @with_camera
     def abort(self):
         self.AbortAcquisition()
+        self.ready = False
 
 
     @with_camera
@@ -299,24 +308,62 @@ class Camera(object):
                 self.Initialize('')
             except e:
                 raise
+
+        # Get detector size and capabilities.
         self.get_detector()
         self.get_capabilities()
+
+        # Enable temperature control.
         if settings.get('isWaterCooled'):
             # Use fan at low speed.
             self.SetFanMode(1)
         else:
             # Use fan at full speed.
             self.SetFanMode(0)
-        self.GetTemperatureRange(self.temperature_min, self.temperature_max)
-        t_target = int(settings.get('targetTemperature', 0))
-        self.t_set_point.value = max(self.t_min.value,
-                                        min(self.t_max.value, t_target))
-        self.SetTemperature(self.t_set_point)
+        self.GetTemperatureRange(self.t_min, self.t_max)
+        
+        # If a temperature is specified, then use it. Otherwise, hardware
+        # default or previos value will be used.
+        t_target = settings.get('targetTemperature')
+        if t_target is not None:
+            # Temperature set-point is limited to available range.
+            self.t_set_point.value = max(self.t_min.value,
+                                         min(self.t_max.value, int(t_target)))
+            self.SetTemperature(self.t_set_point)
+                
+        # Turn the cooler on.
         self.CoolerON()
+
+        # Set the acquisition mode to single frame.
+        self.SetAcquisitionMode(1)
+
         self.enabled = True
         return self.enabled
 
 
+    @with_camera
+    def make_safe(self):
+        """ Put the camera into a safe but active state."""
+        # Set lowest EM gain on EMCCD cameras.
+        if self.caps.ulSetFunctions & sdk.AC_SETFUNCTION_EMCCDGAIN:
+            self.SetEMCCDGain(0)
+
+        # Switch to conventional amplifier on supported cameras.
+        if self.caps.ulCameraType in [sdk.AC_CAMERATYPE_CLARA,
+                                      sdk.AC_CAMERATYPE_IXON,
+                                      sdk.AC_CAMERATYPE_IXONULTRA,
+                                      sdk.AC_CAMERATYPE_NEWTON]:
+            self.SetOutputAmplifier(1)
+
+
+    @with_camera
+    def prepare(self):
+        """Prepare the camera for data acquisition."""
+        self.get_detector()
+        self.get_capabilities()
+
+
+    ### (Fairly) simple wrappers and utility functions. ###
     @with_camera
     def get_acquisition_timings(self):
         exposure = c_float()
@@ -343,6 +390,7 @@ class Camera(object):
     @with_camera
     def get_capabilities(self):
         sdk.GetCapabilities(self.caps)
+        return self.caps
 
 
     @with_camera
@@ -418,20 +466,6 @@ class Camera(object):
 
 
     @with_camera
-    def make_safe(self):
-        # Set lowest EM gain on EMCCD cameras.
-        if self.caps.ulSetFunctions & sdk.AC_SETFUNCTION_EMCCDGAIN:
-            self.SetEMCCDGain(0)
-
-        # Switch to conventional amplifier on supported cameras.
-        if self.caps.ulCameraType in [sdk.AC_CAMERATYPE_CLARA,
-                                      sdk.AC_CAMERATYPE_IXON,
-                                      sdk.AC_CAMERATYPE_IXONULTRA,
-                                      sdk.AC_CAMERATYPE_NEWTON]:
-            self.SetOutputAmplifier(1)
-
-
-    @with_camera
     def is_preamp_gain_available(self, channel, amplifier, index, gain):
         status = c_int()
         sdk.IsPreAmpGainAvailable(int(channel),
@@ -444,16 +478,9 @@ class Camera(object):
 
     @with_camera
     def is_ready(self):
-        temperature = int(self.get_temperature())
-        t_on_target = abs(self.t_set_point - temperature) < self.t_threshold
-        return self.enabled and t_on_target
-
-
-    @with_camera
-    def prepare(self):
-        """Prepare the camera for data acquisition."""
-        self.get_detector()
-        self.get_capabilities()
+        status = self.GetTemperature(c_int())
+        self.ready = (status == sdk.DRV_TEMP_STABILIZED) and self.enabled
+        return self.ready
 
 
     @with_camera
@@ -470,6 +497,41 @@ class Camera(object):
         (index, speed) = self.get_fastest_recommended_vs_speed
         self.SetVSSpeed(int(index))
         return speed
+
+
+class DataThread(threading.Thread):
+    """A thread to collect acquired data and dispatch it to a client."""
+    def __init__(self, cam):
+        threading.Thread.__init__(self)
+        self.skip_next_n_images = 0
+        self.exposure_count = 0
+        self.skip_every_n_images = 1
+        self.should_quit = False
+        self.cam = weakref.proxy(cam)
+        self.image_array = numpy.zeros((cam.nx, cam.ny), dtype=numpy.uint16)
+        self.n_pixels = cam.nx * cam.ny
+
+
+    def __del__(self):
+        if self.is_alive:
+            self.should_quit = True
+
+
+    def run(self):
+        while not self.should_quit:
+            try:
+                result = self.cam.GetOldestImage16(self.image_array, 
+                                                   self.n_pixels)
+            except:
+                raise
+
+            if result == sdk.DRV_SUCCESS:
+                # new data was transferred
+                pass
+            else:
+                time.sleep(0.1)
+
+
 
 if __name__ == '__main__':
     """ If called from the command line, create CameraServers.
