@@ -11,7 +11,9 @@ import re, sys, functools
 from ctypes import Structure, WinDLL, POINTER
 from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
 from ctypes import c_ubyte, c_short, c_float, c_double, c_char, c_char_p
+from ctypes import c_void_p
 from ctypes.wintypes import BYTE, WORD, DWORD, HANDLE, HWND
+from numpy.ctypeslib import ndpointer
 
 
 _dll = WinDLL('atmcd64d.dll')
@@ -761,14 +763,6 @@ function_list = [
 this = sys.modules[__name__]
 
 
-## types
-at_32 = c_long
-at_u32 = c_ulong
-at_64 = c_longlong
-at_u64 =  c_ulonglong
-
-
-
 class SYSTEMTIME(Structure):
     _fields_ = [
         ('wYear', WORD),
@@ -781,6 +775,12 @@ class SYSTEMTIME(Structure):
         ('wMilliseconds', WORD),
         ]
 
+
+## types
+at_32 = c_long
+at_u32 = c_ulong
+at_64 = c_longlong
+at_u64 =  c_ulonglong
 
 _types = {
     'int': c_int,
@@ -815,11 +815,9 @@ def sdk_wrapper(func):
     def wrapper(*args, **kwargs):
         try:
             status = func(*args, **kwargs)
-            # Return args on success or idle.
-            if status == DRV_SUCCESS:
-                return args
-            elif status == DRV_IDLE:
-                return args
+            # Return args on success, idle or no_new_data.
+            if status in [DRV_SUCCESS, DRV_IDLE, DRV_NO_NEW_DATA]:
+                return status
             # Return temperature status codes.
             elif status in range(DRV_TEMP_CODES, DRV_GENERAL_ERRORS):
                 return status
@@ -852,26 +850,41 @@ for fndef in function_list:
     # Set the return type - always an int for these SDK functions.
     f.restype = c_int
 
-    # Set the types of the function arguments.
     argtypes = []
     is_pointer = False
     for arg in args:
         # We don't care about const.
         arg = arg.replace('const ', '')
+        # Unsigned ctypes are prefixed with u_.
         arg = arg.replace('unsigned ', 'u_')
+        # Does the pointer expect a pointer for this argument?
         is_pointer = '*' in arg
+        # Get the argument type and name from first and last tokens in arg.
         argtype = arg.split()[0]
-        if argtype == 'void':
+        argname = arg.split()[-1]
+
+        if argtype == 'void' and is_pointer:
+            argtype = c_void_p
+        elif argtype == 'void':
+            # void but not pointer, so fn(void): no arguments.
             pass
         elif argtype == 'char' and is_pointer:
             argtypes.append(c_char_p)
         elif argtype in _types and is_pointer:
-            argtypes.append(POINTER(_types[argtype]))
+            if argname == 'arr':
+                # This expects an array, so we will pass a numpy pointer
+                argtypes.append(ndpointer(_types[argtype],
+                                           flags="C_CONTIGUOUS"))
+            else:
+                # Argument is a normal pointer to some type.
+                argtypes.append(POINTER(_types[argtype]))
         elif argtype in _types:
+            # Argument is a straight type.
             argtypes.append(_types[argtype])
         else:
+            # The argument type is not supported here.
             raise Exception('Type %s not handled.' % argtype)
-        f.argtypes = tuple(argtypes)
+        f.argtypes = argtypes
 
 
 ## We need a mapping to enable lookup of status codes to meaning.
@@ -887,5 +900,3 @@ def lookup_status(code):
         return status_codes[key]
     else:
         return "Unknown status code %s." % key
-
-
