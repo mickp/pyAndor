@@ -6,20 +6,22 @@ Alternatively, import CameraManager for multiple cameras in one
 process.This module defines the Camera class for Andor cameras.
 
 === Interesting features of the Andor SDK. ===
-The DLL relies on runtime-generated handles to access specific cameras. The
-handles appear to be generated when there is a call to GetCameraHandle or
-Initialize.
+The DLL relies on runtime-generated handles to access specific
+cameras. The handles appear to be generated when there is a call to
+GetCameraHandle or Initialize.
 
-The handle for a given camera is not necessarily the same from one process to
-the next, which means we need to rely on the camera serial number. However,
-it is not possible to sucessfully call GetCameraSerialNumber until
-Initialize('') has been completed. Once Initialize has been called in one
-process, it grabs the CurrentCamera: subsequent calls to Initialize in
-processes that have the same CurrentCamera will fail, unless the original
-process made an explicit call to ShutDown.
+The handle for a given camera is not necessarily the same from one
+process to the next, which means we need to rely on the camera serial
+number. However, it is not possible to sucessfully call
+GetCameraSerialNumber until Initialize('') has been completed. Once
+Initialize has been called in one process, it grabs the CurrentCamera:
+subsequent calls to Initialize in processes that have the same
+CurrentCamera will fail, unless the original process made an explicit
+call to ShutDown.
 
-So we can't spawn a process then select a known camera:  we have to blindly
-pick a different camera for each process and run with what it gets.
+So we can't spawn a process then select a known camera:  we have to
+blindly pick a different camera for each process and run with what it
+gets.
 """
 
 import andorsdk as sdk
@@ -65,9 +67,9 @@ dll_lock = threading.Lock()
 def with_camera(func):
     """A decorator for camera functions.
 
-    If there are multiple cameras per process, this decorator obtains a lock
-    on the DLL and calls SetCurrentCamera to ensure that the library acts on
-    the correct piece of hardware.
+    If there are multiple cameras per process, this decorator obtains a
+    lock on the DLL and calls SetCurrentCamera to ensure that the
+    library acts on the correct piece of hardware.
     """
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
@@ -163,22 +165,23 @@ class CameraServer(Process):
 
 
     def serve(self):
-        ## This works for each camera ... once.  If a process is terminated
-        # then you try and create a new process for the same camera, the SDK
-        # will not allow you to Initialize.
+        ## This works for each camera ... once.  If a process is 
+        # terminated then you try and create a new process for the same
+        # camera, the SDK will not succesfully Initialize.
 
-        # TODO: I think we may need to call Shutdown before the process exits ...
-        # but Process.terminate kills it right away, so we probaly need to
-        # stop the Pyro Daemon, then call Shutdown, then return / join the main
-        # process.
+        # TODO: I think we may need to call Shutdown before the
+        # process exits ... but Process.terminate kills it right away,
+        # so we probaly need to stop the Pyro Daemon, then call
+        # Shutdown, then return / join the main process.
         serial = c_long()
         num_cameras = c_long()
         handle = c_long()
 
         sdk.GetAvailableCameras(num_cameras)
         if self.index >= num_cameras.value:
-            raise Exception("Camera index %d too large: I only have %d cameras." % (
-                                self.index, num_cameras.value))
+            raise Exception(
+                "Camera index %d too large: I only have %d cameras."
+                % (self.index, num_cameras.value))
 
         sdk.GetCameraHandle(self.index, handle)
 
@@ -192,10 +195,12 @@ class CameraServer(Process):
         self.cam.GetCameraSerialNumber(serial)
 
         if not self.serial_to_host.has_key(serial.value):
-            raise Exception("No host found for camera with serial number %s." % serial.value)
+            raise Exception("No host found for camera with serial number %s."
+                                % serial.value)
 
         if not self.serial_to_port.has_key(serial.value):
-            raise Exception("No host found for camera with serial number %s." % serial.value)
+            raise Exception("No host found for camera with serial number %s."
+                                % serial.value)
 
         host = self.serial_to_host[serial.value]
         port = self.serial_to_port[serial.value]
@@ -207,8 +212,8 @@ class CameraServer(Process):
 class CameraMeta(type):
     """A metaclass that adds DLL methods to the Camera class.
 
-    Methods from the SDK DLL are wrapped by 'sdk_call' to remove 'self' from
-    the args, then by 'with_camera' so that
+    Methods from the SDK DLL are wrapped by 'sdk_call' to remove 'self'
+    from the args, then by 'with_camera' so that
     * a lock is obtained on the DLL;
     * the DLL is set to act on the Camera instance;
     * the DLL method is called;
@@ -223,8 +228,9 @@ class CameraMeta(type):
 class Camera(object):
     """Camera class for Andor cameras.
 
-    All instance methods should be decorated with @with_camera: this obtains a
-    lock on the DLL, and sets the target camera for DLL methods.
+    All instance methods should be decorated with @with_camera: this
+    obtains a lock on the DLL, and sets the target camera for DLL
+    methods.
     """
     # Use the CameraMeta class to add DLL methods to this class.
     __metaclass__ = CameraMeta
@@ -536,10 +542,10 @@ class DataThread(threading.Thread):
 if __name__ == '__main__':
     """ If called from the command line, create CameraServers.
 
-    There will be a delay while the dll initializes each camera:  it does
-    not seem able to do concurrent initializations, even in separate
-    processes.  Hopefully, this will prevent any delay each time we connect
-    to the camera from cockpit.
+    There will be a delay while the dll initializes each camera:  it
+    does not seem able to do concurrent initializations, even in
+    separate processes.  Hopefully, this will prevent any delay each
+    time we connect to the camera from cockpit.
     """
     from time import sleep
     num_cameras = c_long()
