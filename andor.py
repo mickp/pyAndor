@@ -161,6 +161,7 @@ class CameraServer(Process):
 
 
     def run(self):
+        print("Service %d has PID %d." % (self.index + 1, self.pid))
         self.serve()
 
 
@@ -204,6 +205,8 @@ class CameraServer(Process):
 
         host = self.serial_to_host[serial.value]
         port = self.serial_to_port[serial.value]
+        print "Camera with serial number %d on  %s:%s." % (serial.value,
+                                                           host, port)
         daemon = Pyro4.Daemon(port=port, host=host)
         Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
                                  daemon=daemon, ns=False, verbose=True)
@@ -269,13 +272,14 @@ class Camera(object):
         self.enabled = False
         # Is the camera ready?
         self.ready = False
+        # The current acquisition mode.
+        self.acquistion_mode = None
         # Temperature min. and max. possible values.
         self.t_min = c_int()
         self.t_max = c_int()
         # Temperature set point and threshold.
-        self.t_set_point = c_int()
-        self.t_threshold = 2
-        self.t_state = None
+        self.temperature_set_point = c_int()
+        self.temperature_state = None
         # Thread to handle data on exposure
         self.data_thread = None
 
@@ -285,6 +289,21 @@ class Camera(object):
     def abort(self):
         self.AbortAcquisition()
         self.ready = False
+
+
+    @with_camera
+    def arm(self):
+        if not self.is_ready():
+            raise Exception("Camera not ready.")
+
+        # Open the shutter.
+        # SetShutter(type, mode, t_close_ms, t_open_ms)
+        # type = 0: TTL high = open; 1: TTL low = open
+        # mode = 0: auto, 1: open; 2: closed
+        self.SetShutter(1, 1, 1, 1)
+
+        # Respond to triggers.
+        self.StartAcquisition()
 
 
     @with_camera
@@ -330,21 +349,67 @@ class Camera(object):
         
         # If a temperature is specified, then use it. Otherwise, hardware
         # default or previos value will be used.
-        t_target = settings.get('targetTemperature')
-        if t_target is not None:
+        target_t = settings.get('targetTemperature')
+        if target_t is not None:
             # Temperature set-point is limited to available range.
-            self.t_set_point.value = max(self.t_min.value,
-                                         min(self.t_max.value, int(t_target)))
-            self.SetTemperature(self.t_set_point)
+            self.temperature_set_point.value = max(
+                                        self.t_min.value,
+                                        min(self.t_max.value, int(target_t)))
+            self.SetTemperature(self.temperature_set_point)
                 
         # Turn the cooler on.
         self.CoolerON()
 
-        # Set the acquisition mode to single frame.
-        self.SetAcquisitionMode(1)
+        # Set the exposure time if found in settings.
+        t_exposure = settings.get('exposureTime')
+        if t_exposure:
+            self.set_exposure_time(float(t_exposure))
 
+        # Set the acquisition mode to single frame.
+        self.set_acquisition_mode(1)
+
+        # Enable external triggering.
+        self.SetTriggerMode(1)
+
+        # Recalculate VS speed.
+        self.set_fastest_vs_speed()
+
+        # Set enabled indicator flag.
         self.enabled = True
         return self.enabled
+
+
+    def get_image_size(self):
+        return (self.nx, self.ny)
+
+
+    @with_camera
+    def get_min_time_between_exposures(self):
+        (exposure, accumulate, kinetics) = self.get_acquisition_timings()
+        if self.acquisition_mode in [1, 5]:
+            # single exposure or run until abort
+            return self.get_read_out_time()
+        elif self.acquisition_mode == 2:
+            # accumulate mode
+            return accumulate - exposure
+        elif self.acquisition_mode in [3, 4]:
+            # kinetics mode
+            return kinetics - exposure
+
+
+
+    @with_camera
+    def get_exposure_time(self):
+        (exposure, accumulate, kinetics) = self.get_acquisition_timings()
+        if self.acquisition_mode in [1, 5]:
+            # single exposure or run untul abort
+            return exposure
+        elif self.acquisition_mode == 2:
+            # accumulate mode
+            return accumulate
+        elif self.acquisition_mode in [3, 4]:
+            # kinetics or fast kinetics
+            return kinetics
 
 
     @with_camera
@@ -363,10 +428,20 @@ class Camera(object):
 
 
     @with_camera
-    def prepare(self):
+    def prepare(self, experiment):
         """Prepare the camera for data acquisition."""
         self.get_detector()
         self.get_capabilities()
+
+
+    def receiveClient(self, uri):
+        """Handle connection request from cockpit client."""
+        if uri is None:
+            self.client = None
+        else:
+            self.client = Pyro4.Proxy(uri)
+            if self.data_thread is not None:
+                self.data_thread.set_client(self.client)
 
 
     ### (Fairly) simple wrappers and utility functions. ###
@@ -455,9 +530,16 @@ class Camera(object):
 
 
     @with_camera
+    def get_read_out_time(self):
+        t = c_float()
+        self.GetReadOutTime(t)
+        return t.value
+
+
+    @with_camera
     def get_temperature(self):
         temperature = c_int()
-        self.t_state = sdk.GetTemperature(temperature)
+        self.temperature_state = sdk.GetTemperature(temperature)
         return temperature.value
 
 
@@ -490,17 +572,23 @@ class Camera(object):
 
 
     @with_camera
+    def set_acquisition_mode(self, mode):
+        self.SetAcquisitionMode(mode)
+        self.acquisition_mode = mode
+
+
+    @with_camera
     def set_exposure_time(self, exposure_time):
         """Set the exposure time and update vertical shift speed."""
         self.SetExposureTime(float(exposure_time))
-        set_fastest_vs_speed()
+        self.set_fastest_vs_speed()
         exposure, accumulate, kinetic = self.get_acquisition_timings()
         return exposure
 
 
     def set_fastest_vs_speed(self):
         """Update the vertical shift speed to fasted recommended speed."""
-        (index, speed) = self.get_fastest_recommended_vs_speed
+        (index, speed) = self.get_fastest_recommended_vs_speed()
         self.SetVSSpeed(int(index))
         return speed
 
@@ -526,17 +614,23 @@ class DataThread(threading.Thread):
     def run(self):
         while not self.should_quit:
             try:
-                result = self.cam.GetOldestImage16(self.image_array, 
+                result = self.cam.GetOldestImage16(self.image_array,
                                                    self.n_pixels)
             except:
                 raise
 
             if result == sdk.DRV_SUCCESS:
-                # new data was transferred
-                pass
+                timestamp = 0 # TODO - fix timestamp.
+                if self.client is not None:
+                    self.client.receiveData('new image',
+                                             self.image_array,
+                                             timestamp)
             else:
-                time.sleep(0.1)
+                time.sleep(0.01)
 
+
+    def set_client(client):
+        self.client = client
 
 
 if __name__ == '__main__':
@@ -552,9 +646,11 @@ if __name__ == '__main__':
     sdk.GetAvailableCameras(num_cameras)
 
     children = []
+    print "Found %d cameras." % num_cameras.value
     for i in range(num_cameras.value):
-        print "Starting service %d of %d." % (i + 1, num_cameras.value)
         children.append(CameraServer(i))
+        print("Starting service %d of %d in daemon process ..."
+                % (i + 1, num_cameras.value))
         children[i].start()
 
     try:
