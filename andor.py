@@ -28,12 +28,11 @@ Function names:
 * Direct calls Andor's DLL uses the CapitalCamelCase names it exports.
 """
 
-
-
 import andorsdk as sdk
 import functools
 import numpy
 import Pyro4
+import re
 import sys
 import threading
 import time
@@ -41,34 +40,41 @@ import weakref
 from ctypes import byref, c_float, c_int, c_long, c_ulong
 from ctypes import create_string_buffer, c_char, c_bool
 from multiprocessing import Process, Value, Array
+from collections import namedtuple
+
+# A list of the camera models this module supports (or should support.)
+SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
+
+# Amplfier modes are defined by the AD channel, amplifier type,
+# and an index into the HSSpeed table.
+# I use a list of tuples if label and mode to preserve the label order:
+# to preserve this order in an OrderedDict, each mode would have to be
+# added individually, making it more difficult both to read or edit.
+AmplifierMode = namedtuple('AmplifierMode', ['channel', 'type', 'index'])
+AMPLIFIER_MODES = {
+    sdk.AC_CAMERATYPE_IXONULTRA: [
+        # Verified against the hardware.
+        ('EM 1MHz'   , AmplifierMode(0, 0, 3)),
+        ('EM 5MHz'   , AmplifierMode(0, 0, 2)),
+        ('EM 10MHz'  , AmplifierMode(0, 0, 1)),
+        ('EM 17MHz'  , AmplifierMode(0, 0, 0)),
+        ('Conv 80kHz', AmplifierMode(0, 1, 2)),
+        ('Conv 1MHz' , AmplifierMode(0, 1, 1)),
+        ('Conv 3MHz' , AmplifierMode(0, 1, 0)),
+        ],
+    sdk.AC_CAMERATYPE_IXON: [
+        # Needs to be verified.
+        ('EM16 1MHz'   , AmplifierMode(1, 0, 0)),
+        ('EM14 3MHz'   , AmplifierMode(0, 0, 0)),
+        ('EM14 5MHz'   , AmplifierMode(0, 0, 1)),
+        ('EM14 10MHz'  , AmplifierMode(0, 0, 2)),
+        ('Conv16 1MHz' , AmplifierMode(1, 1, 0)),
+        ('Conv16 3MHz' , AmplifierMode(0, 1, 0)),
+        ]
+    }
 
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
-
-##TODO
-# Triggering
-# Prepare for single frame capture in interactive mode.
-# Prepare for many captures in video mode (capture 'til abort?).
-# Prepare for experiments.
-#
-# Methods Called from cockpit
-# abort()
-# cammode(is16bit, isConventional, speed, EMgain, None)
-# exposeTillAbort(bool)
-# getexp()
-# gettemp()
-# getTimesExpAccKin()
-# init
-# quit()
-# setdarkLRTB(int, int, int, int)
-# setExposureTime(int/float?)
-# setImage:     height, width = setImage(0, yOffset, None, height)
-# setskipLRTB:  imagesize = setskipLRTB(left, right, top, bottom)
-# setshutter(int)
-# settemp(int)
-# settrigger(bool)
-# start(isIxonPlus)
-
 
 def with_camera(func):
     """A decorator for camera functions.
@@ -80,7 +86,7 @@ def with_camera(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         if not self.singleton:
-            # There may be > 1 cameras per process, so lock the DLL
+            # There may be > 1 cameras per process, so lock the DLL.
             had_lock_on_entry = self.has_lock
             if not had_lock_on_entry:
                 dll_lock.acquire()
@@ -481,6 +487,14 @@ class Camera(object):
 
 
     @with_camera
+    def get_amplifier_modes(self):
+        if not self.caps.ulCameraType:
+            self.get_capabilities()
+        # Return the amplifier mode labels.
+        return [mode[0] for mode in AMPLIFIER_MODES[self.caps.ulCameraType]]
+
+
+    @with_camera
     def get_camera_serial_number(self):
         sn = c_int()
         sdk.GetCameraSerialNumber(sn)
@@ -570,6 +584,13 @@ class Camera(object):
         sdk.GetHardwareVersion(*parameters)
         result = [p.value for p in plist]
         return result
+
+
+    @with_camera
+    def get_head_model(self):
+        s = create_string_buffer(128)
+        sdk.GetHeadModel(s)
+        return s.value
 
 
     @with_camera
@@ -735,17 +756,22 @@ if __name__ == '__main__':
     sys.stdout.write("Found %d cameras." % num_cameras.value)
     
     for i in range(num_cameras.value):
+        # For each camera we found ...
+        # ... create a shared status object, ...
         statuses.append(StatusObject())
+        # ... spawn a CameraServer in a separate process, ...
         children.append(CameraServer(i, status=statuses[i]))
         sys.stdout.write("Starting service %d of %d in daemon process ..."
                 % (i + 1, num_cameras.value))
+        # ... and start the child process.
         children[i].start()
 
     try:
         while True:
+            # Generate a status string.
             sstr = ''
             for i, status in enumerate(statuses):
-                sstr += '\033[30m' # Black foreground
+                sstr += '\033[30m' #and Black foreground
                 if not status.live.value:
                     sstr += '\033[41m' # red background
                 elif status.live.value and not status.enabled.value:
@@ -785,8 +811,9 @@ if __name__ == '__main__':
             sys.stdout.write('\033[39m\033[49m')
             # Move cursor down a few rows.
             sys.stdout.write('\033[%d;1H' % (num_cameras.value + 2))
-
+            # Wait 1s between updates.
             time.sleep(1)
     finally:
         for c in children:
+            # As this process exits, clean up child processes.
             c.terminate()
