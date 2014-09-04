@@ -33,8 +33,12 @@ import threading
 import time
 import weakref
 from ctypes import byref, c_float, c_int, c_long, c_ulong
-from ctypes import create_string_buffer
-from multiprocessing import Process
+from ctypes import create_string_buffer, c_char, c_bool
+from multiprocessing import Process, Value, Array
+
+## Maximum status-string length.
+STATUS_STRING_LENGTH = 80
+
 
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
@@ -150,7 +154,7 @@ class CameraManager(object):
 
 class CameraServer(Process):
     """A class to serve Camera objects over Pyro."""
-    def __init__(self, index):
+    def __init__(self, index, status_string=None):
         super(CameraServer, self).__init__()
         self.daemon = True
         self.index = index
@@ -158,7 +162,7 @@ class CameraServer(Process):
         self.serial_to_host = {9145: '127.0.0.1', 9146: '127.0.0.1'}
         self.serial_to_port = {9145: 7776, 9146: 7777}
         self.cam = None
-
+        self.status_string = status_string
 
     def run(self):
         print("Service %d has PID %d." % (self.index + 1, self.pid))
@@ -174,7 +178,7 @@ class CameraServer(Process):
         # process exits ... but Process.terminate kills it right away,
         # so we probaly need to stop the Pyro Daemon, then call
         # Shutdown, then return / join the main process.
-        serial = c_long()
+        serial = None
         num_cameras = c_long()
         handle = c_long()
 
@@ -193,20 +197,23 @@ class CameraServer(Process):
 
         self.cam = Camera(handle, singleton=True)
         self.cam.Initialize('')
-        self.cam.GetCameraSerialNumber(serial)
+        serial = self.cam.get_camera_serial_number()
 
-        if not self.serial_to_host.has_key(serial.value):
+        if not self.serial_to_host.has_key(serial):
             raise Exception("No host found for camera with serial number %s."
-                                % serial.value)
+                                % serial)
 
-        if not self.serial_to_port.has_key(serial.value):
+        if not self.serial_to_port.has_key(serial):
             raise Exception("No host found for camera with serial number %s."
-                                % serial.value)
+                                % serial)
 
-        host = self.serial_to_host[serial.value]
-        port = self.serial_to_port[serial.value]
-        print "Camera with serial number %d on  %s:%s." % (serial.value,
-                                                           host, port)
+        host = self.serial_to_host[serial]
+        port = self.serial_to_port[serial]
+ 
+        if self.status_string:
+            status_thread = StatusThread(self.cam, port, self.status_string)
+            status_thread.start()
+ 
         daemon = Pyro4.Daemon(port=port, host=host)
         Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
                                  daemon=daemon, ns=False, verbose=True)
@@ -384,21 +391,6 @@ class Camera(object):
 
 
     @with_camera
-    def get_min_time_between_exposures(self):
-        (exposure, accumulate, kinetics) = self.get_acquisition_timings()
-        if self.acquisition_mode in [1, 5]:
-            # single exposure or run until abort
-            return self.get_read_out_time()
-        elif self.acquisition_mode == 2:
-            # accumulate mode
-            return accumulate - exposure
-        elif self.acquisition_mode in [3, 4]:
-            # kinetics mode
-            return kinetics - exposure
-
-
-
-    @with_camera
     def get_exposure_time(self):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
         if self.acquisition_mode in [1, 5]:
@@ -410,6 +402,20 @@ class Camera(object):
         elif self.acquisition_mode in [3, 4]:
             # kinetics or fast kinetics
             return kinetics
+
+
+    @with_camera
+    def get_min_time_between_exposures(self):
+        (exposure, accumulate, kinetics) = self.get_acquisition_timings()
+        if self.acquisition_mode in [1, 5]:
+            # single exposure or run until abort
+            return self.get_read_out_time()
+        elif self.acquisition_mode == 2:
+            # accumulate mode
+            return accumulate - exposure
+        elif self.acquisition_mode in [3, 4]:
+            # kinetics mode
+            return kinetics - exposure
 
 
     @with_camera
@@ -619,7 +625,7 @@ class DataThread(threading.Thread):
             except:
                 raise
 
-            if result == sdk.DRV_SUCCESS:
+            if result == sdk.DRV_SUCCESS:                
                 timestamp = 0 # TODO - fix timestamp.
                 if self.client is not None:
                     self.client.receiveData('new image',
@@ -633,7 +639,61 @@ class DataThread(threading.Thread):
         self.client = client
 
 
+class StatusThread(threading.Thread):
+    """A thread to maintain a status string."""
+    def __init__(self, cam, port, status_string):
+        threading.Thread.__init__(self)
+        self.cam = cam
+        self.status_string = status_string
+        self.should_quit = False
+        self.port = port
+        self.serial = None
+
+    
+    def __del__(self):
+        if self.is_alive:
+            self.should_quit = True
+
+
+    def run(self):
+        while not self.should_quit:
+            if not self.serial:
+                try:
+                    self.serial = self.cam.get_camera_serial_number()
+                except:
+                    pass
+                
+            if not self.serial:
+                sstr = 'Not initialized.'
+            else:
+                try:
+                    temp = str(self.cam.get_temperature())
+                except:
+                    # Driver probably finished initialization.
+                    temp = 'n/a'
+
+                sstr = "Port: %5s; Enab %5s; Rdy %5s; Temp %2s." % (
+                    self.port,
+                    self.cam.enabled, 
+                    self.cam.ready, 
+                    temp,
+                    )
+            
+            self.status_string.value = sstr[0:STATUS_STRING_LENGTH]
+            time.sleep(1)
+
+class StatusObject(threading.Thread):
+    def __init__(self):
+        self.armed = Value(c_bool)
+        self.enabled = Value(c_bool)
+        self.ready = Value(c_bool)
+        self.serial = Value(c_int)
+        self.temperature = Value(c_int)
+
+
 if __name__ == '__main__':
+    import colorama
+    colorama.init()
     """ If called from the command line, create CameraServers.
 
     There will be a delay while the dll initializes each camera:  it
@@ -641,21 +701,42 @@ if __name__ == '__main__':
     separate processes.  Hopefully, this will prevent any delay each
     time we connect to the camera from cockpit.
     """
-    from time import sleep
     num_cameras = c_long()
     sdk.GetAvailableCameras(num_cameras)
 
     children = []
-    print "Found %d cameras." % num_cameras.value
+    status_strings = []
+    sys.stdout.write("Found %d cameras." % num_cameras.value)
+    
     for i in range(num_cameras.value):
-        children.append(CameraServer(i))
-        print("Starting service %d of %d in daemon process ..."
+        status_strings.append(Array(c_char, STATUS_STRING_LENGTH))
+        children.append(CameraServer(i, status_string=status_strings[i]))
+        sys.stdout.write("Starting service %d of %d in daemon process ..."
                 % (i + 1, num_cameras.value))
         children[i].start()
 
     try:
         while True:
-            sleep(1)
+            status = ''
+            for i, sstr in enumerate(status_strings):
+                if len(sstr.value):
+                    status += '\033[42m' # Green background
+                else:
+                    status += '\033[41m' # Red background
+                status += '\033[30m' # Black foreground
+                status += 'Cam%1d in PID%5d:' % (i + 1, children[i].pid)
+                status +=  sstr.value + '     \n'
+            # Move cursor to top of console.
+            sys.stdout.write('\033[1;1H') 
+            # Write out status.
+            sys.stdout.write(status)
+            # Reset colours.
+            sys.stdout.write('\033[39m\033[49m')
+            # Move cursor down a few rows.
+            sys.stdout.write('\033[10;1H')
+
+
+            time.sleep(1)
     finally:
         for c in children:
             c.terminate()
