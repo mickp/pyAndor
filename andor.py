@@ -22,7 +22,13 @@ call to ShutDown.
 So we can't spawn a process then select a known camera:  we have to
 blindly pick a different camera for each process and run with what it
 gets.
+
+Function names:
+* Local function definitions use names as lower_case.
+* Direct calls Andor's DLL uses the CapitalCamelCase names it exports.
 """
+
+
 
 import andorsdk as sdk
 import functools
@@ -264,6 +270,8 @@ class Camera(object):
 
     def __init__(self, handle, singleton=False):
         """Init a Camera instance for hardware with ID=handle."""
+        # Number of exposures fetched since last armed.
+        self.count = 0
         # SDK's handle for the camera
         self.handle = handle
         # Does this camera have the lock on the DLL?
@@ -309,9 +317,12 @@ class Camera(object):
         # type = 0: TTL high = open; 1: TTL low = open
         # mode = 0: auto, 1: open; 2: closed
         self.SetShutter(1, 1, 1, 1)
+
+        # Reset image count and set armed.
+        self.count = 0
         self.armed = True
 
-        # Respond to triggers.
+        # Set camera to espond to triggers.
         self.StartAcquisition()
 
 
@@ -629,6 +640,7 @@ class DataThread(threading.Thread):
 
             if result == sdk.DRV_SUCCESS:
                 timestamp = 0 # TODO - fix timestamp.
+                cam.count += 1
                 if self.client is not None:
                     self.client.receiveData('new image',
                                              self.image_array,
@@ -684,6 +696,7 @@ class StatusThread(threading.Thread):
                 self.status.enabled.value = self.cam.enabled
                 self.status.ready.value = self.cam.ready
                 self.status.armed.value = self.cam.armed
+                self.status.count.value = self.cam.count
             time.sleep(1)
 
 
@@ -693,15 +706,14 @@ class StatusObject(object):
         # Need to use c_int for bools, as c_bool is unhashable.
         self.armed = Value(c_bool)
         self.enabled = Value(c_bool)
-        self.ready = Value(c_bool)
+        self.count = Value(c_int)
         self.port = Value(c_int)
+        self.ready = Value(c_bool)
         self.serial = Value(c_int)
         self.temperature = Value(c_int)
         # These values are False until we find otherwise.
-        self.valid_temperature = Value(c_bool)
-        self.valid_temperature.value = False
-        self.live = Value(c_bool)
-        self.live.value = False
+        self.valid_temperature = Value(c_bool, False)
+        self.live = Value(c_bool, False)
 
 
 if __name__ == '__main__':
@@ -743,22 +755,28 @@ if __name__ == '__main__':
                 else:
                     sstr += '\033[47m' # white background                 
                 # Show camera and PID
-                sstr += 'Cam%1d in PID%5d:' % (i + 1, children[i].pid)
+                sstr += 'Cam%1d | PID%5d | ' % (i + 1, children[i].pid)
                 # Show port
-                sstr += 'PORT%6d; ' % status.port.value
+                sstr += 'PORT%6d | ' % status.port.value
                 # Show state
-                sstr += 'Enab %5s; Ready; %5s; Armed %5s; ' % (
+                sstr += 'Enab %5s | Ready %5s | Armed %5s | ' % (
                         status.enabled.value,
                         status.ready.value,
                         status.armed.value)
                 # Show temperature
                 sstr += 'Temp '
                 if status.valid_temperature.value:
-                    sstr += '%3d.' % status.temperature.value
+                    sstr += '%3d | ' % status.temperature.value
                 else:
-                    sstr += '???'
+                    sstr += '??? | '
+
+                # Show count of images since last call to cam.arm.
+                sstr += "Count %5d." % status.count.value
+
                 # New line
                 sstr += '\n'
+            # Would be nice to save and restore the cursor position, but there
+            # is no stock curses support under Windows.
             # Move cursor to top of console.
             sys.stdout.write('\033[1;1H') 
             # Write out status.
@@ -766,8 +784,7 @@ if __name__ == '__main__':
             # Reset colours.
             sys.stdout.write('\033[39m\033[49m')
             # Move cursor down a few rows.
-            sys.stdout.write('\033[10;1H')
-
+            sys.stdout.write('\033[%d;1H' % (num_cameras.value + 2))
 
             time.sleep(1)
     finally:
