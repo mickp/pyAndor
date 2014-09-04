@@ -36,10 +36,6 @@ from ctypes import byref, c_float, c_int, c_long, c_ulong
 from ctypes import create_string_buffer, c_char, c_bool
 from multiprocessing import Process, Value, Array
 
-## Maximum status-string length.
-STATUS_STRING_LENGTH = 80
-
-
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
 
@@ -154,18 +150,18 @@ class CameraManager(object):
 
 class CameraServer(Process):
     """A class to serve Camera objects over Pyro."""
-    def __init__(self, index, status_string=None):
+    def __init__(self, index, status=None):
         super(CameraServer, self).__init__()
+        # daemon=True means that this process will be terminated with parent.
         self.daemon = True
         self.index = index
         #TODO - should read serial_to_* from config file.
         self.serial_to_host = {9145: '127.0.0.1', 9146: '127.0.0.1'}
         self.serial_to_port = {9145: 7776, 9146: 7777}
         self.cam = None
-        self.status_string = status_string
+        self.status = status
 
     def run(self):
-        print("Service %d has PID %d." % (self.index + 1, self.pid))
         self.serve()
 
 
@@ -210,8 +206,8 @@ class CameraServer(Process):
         host = self.serial_to_host[serial]
         port = self.serial_to_port[serial]
  
-        if self.status_string:
-            status_thread = StatusThread(self.cam, port, self.status_string)
+        if self.status:
+            status_thread = StatusThread(self.cam, port, self.status)
             status_thread.start()
  
         daemon = Pyro4.Daemon(port=port, host=host)
@@ -261,6 +257,9 @@ class Camera(object):
         except:
             # May raise exception if camera never initialized - not a problem.
             pass
+        self.enabled = False
+        self.armed = False
+        self.ready = False
 
 
     def __init__(self, handle, singleton=False):
@@ -279,6 +278,8 @@ class Camera(object):
         self.enabled = False
         # Is the camera ready?
         self.ready = False
+        # Is the camera armed to respond to triggers?
+        self.armed = False
         # The current acquisition mode.
         self.acquistion_mode = None
         # Temperature min. and max. possible values.
@@ -308,6 +309,7 @@ class Camera(object):
         # type = 0: TTL high = open; 1: TTL low = open
         # mode = 0: auto, 1: open; 2: closed
         self.SetShutter(1, 1, 1, 1)
+        self.armed = True
 
         # Respond to triggers.
         self.StartAcquisition()
@@ -625,7 +627,7 @@ class DataThread(threading.Thread):
             except:
                 raise
 
-            if result == sdk.DRV_SUCCESS:                
+            if result == sdk.DRV_SUCCESS:
                 timestamp = 0 # TODO - fix timestamp.
                 if self.client is not None:
                     self.client.receiveData('new image',
@@ -641,13 +643,12 @@ class DataThread(threading.Thread):
 
 class StatusThread(threading.Thread):
     """A thread to maintain a status string."""
-    def __init__(self, cam, port, status_string):
+    def __init__(self, cam, port, status):
         threading.Thread.__init__(self)
         self.cam = cam
-        self.status_string = status_string
+        self.status = status
+        self.status.port.value = port
         self.should_quit = False
-        self.port = port
-        self.serial = None
 
     
     def __del__(self):
@@ -657,38 +658,50 @@ class StatusThread(threading.Thread):
 
     def run(self):
         while not self.should_quit:
-            if not self.serial:
+            if not self.status.live.value:
+            # Status does not show camera is live.
+                serial = None
                 try:
-                    self.serial = self.cam.get_camera_serial_number()
+                    serial = self.cam.get_camera_serial_number()
                 except:
+                    # Driver probably not initialized.
                     pass
-                
-            if not self.serial:
-                sstr = 'Not initialized.'
+                # Did we get a serial number?
+                if serial:
+                    self.status.serial.value = serial
+                    self.status.live.value = True
             else:
+            # Status shows camera is live.
                 try:
-                    temp = str(self.cam.get_temperature())
+                    temperature = self.cam.get_temperature()
                 except:
                     # Driver probably finished initialization.
-                    temp = 'n/a'
+                    self.status.valid_temperature.value = False
+                else:
+                    self.status.valid_temperature.value = True
+                    self.status.temperature.value = temperature
 
-                sstr = "Port: %5s; Enab %5s; Rdy %5s; Temp %2s." % (
-                    self.port,
-                    self.cam.enabled, 
-                    self.cam.ready, 
-                    temp,
-                    )
-            
-            self.status_string.value = sstr[0:STATUS_STRING_LENGTH]
+                self.status.enabled.value = self.cam.enabled
+                self.status.ready.value = self.cam.ready
+                self.status.armed.value = self.cam.armed
             time.sleep(1)
 
-class StatusObject(threading.Thread):
+
+class StatusObject(object):
+    """StatusObject is used to share camera status between processes."""
     def __init__(self):
+        # Need to use c_int for bools, as c_bool is unhashable.
         self.armed = Value(c_bool)
         self.enabled = Value(c_bool)
         self.ready = Value(c_bool)
+        self.port = Value(c_int)
         self.serial = Value(c_int)
         self.temperature = Value(c_int)
+        # These values are False until we find otherwise.
+        self.valid_temperature = Value(c_bool)
+        self.valid_temperature.value = False
+        self.live = Value(c_bool)
+        self.live.value = False
 
 
 if __name__ == '__main__':
@@ -705,31 +718,51 @@ if __name__ == '__main__':
     sdk.GetAvailableCameras(num_cameras)
 
     children = []
-    status_strings = []
+    statuses = []
+    sys.stdout.write('\033[2J') # Clear the terminal window.
     sys.stdout.write("Found %d cameras." % num_cameras.value)
     
     for i in range(num_cameras.value):
-        status_strings.append(Array(c_char, STATUS_STRING_LENGTH))
-        children.append(CameraServer(i, status_string=status_strings[i]))
+        statuses.append(StatusObject())
+        children.append(CameraServer(i, status=statuses[i]))
         sys.stdout.write("Starting service %d of %d in daemon process ..."
                 % (i + 1, num_cameras.value))
         children[i].start()
 
     try:
         while True:
-            status = ''
-            for i, sstr in enumerate(status_strings):
-                if len(sstr.value):
-                    status += '\033[42m' # Green background
+            sstr = ''
+            for i, status in enumerate(statuses):
+                sstr += '\033[30m' # Black foreground
+                if not status.live.value:
+                    sstr += '\033[41m' # red background
+                elif status.live.value and not status.enabled.value:
+                    sstr += '\033[43m' # yellow background
+                elif status.live.value and status.enabled.value:
+                    sstr += '\033[42m' # green background
                 else:
-                    status += '\033[41m' # Red background
-                status += '\033[30m' # Black foreground
-                status += 'Cam%1d in PID%5d:' % (i + 1, children[i].pid)
-                status +=  sstr.value + '     \n'
+                    sstr += '\033[47m' # white background                 
+                # Show camera and PID
+                sstr += 'Cam%1d in PID%5d:' % (i + 1, children[i].pid)
+                # Show port
+                sstr += 'PORT%6d; ' % status.port.value
+                # Show state
+                sstr += 'Enab %5s; Ready; %5s; Armed %5s; ' % (
+                        status.enabled.value,
+                        status.ready.value,
+                        status.armed.value)
+                # Show temperature
+                sstr += 'Temp '
+                if status.valid_temperature.value:
+                    sstr += '%3d.' % status.temperature.value
+                else:
+                    sstr += '???'
+                # New line
+                sstr += '\n'
             # Move cursor to top of console.
             sys.stdout.write('\033[1;1H') 
             # Write out status.
-            sys.stdout.write(status)
+            sys.stdout.write(sstr)
             # Reset colours.
             sys.stdout.write('\033[39m\033[49m')
             # Move cursor down a few rows.
