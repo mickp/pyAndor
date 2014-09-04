@@ -738,8 +738,6 @@ class StatusObject(object):
 
 
 if __name__ == '__main__':
-    import colorama
-    colorama.init()
     """ If called from the command line, create CameraServers.
 
     There will be a delay while the dll initializes each camera:  it
@@ -747,6 +745,17 @@ if __name__ == '__main__':
     separate processes.  Hopefully, this will prevent any delay each
     time we connect to the camera from cockpit.
     """
+    # Fix for a win32 and colorama bug
+    import colorama
+    try:
+        test = colorama.Win32.COORD(0,0)
+    except:
+        from ctypes.wintypes import _COORD
+        colorama.win32.COORD = _COORD
+    else:
+        del(test)
+    colorama.init()
+
     num_cameras = c_long()
     sdk.GetAvailableCameras(num_cameras)
 
