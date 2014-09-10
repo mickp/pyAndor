@@ -45,6 +45,11 @@ from collections import namedtuple
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
 
+SETTERS = {
+    'exposureTime': (sdk.SetExposureTime, float),
+    'EMGain': (sdk.SetEMCCDGain, int),
+}
+
 # Amplfier modes are defined by the AD channel, amplifier type,
 # and an index into the HSSpeed table.
 # I use a list of tuples if label and mode to preserve the label order:
@@ -178,7 +183,7 @@ class CameraServer(Process):
 
 
     def serve(self):
-        ## This works for each camera ... once.  If a process is 
+        ## This works for each camera ... once.  If a process is
         # terminated then you try and create a new process for the same
         # camera, the SDK will not succesfully Initialize.
 
@@ -217,11 +222,11 @@ class CameraServer(Process):
 
         host = self.serial_to_host[serial]
         port = self.serial_to_port[serial]
- 
+
         if self.status:
             status_thread = StatusThread(self.cam, port, self.status)
             status_thread.start()
- 
+
         daemon = Pyro4.Daemon(port=port, host=host)
         Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
                                  daemon=daemon, ns=False, verbose=True)
@@ -304,6 +309,7 @@ class Camera(object):
         self.temperature_state = None
         # Thread to handle data on exposure
         self.data_thread = None
+        self.settings = {}
 
 
     ### Client functions. ###
@@ -357,7 +363,7 @@ class Camera(object):
         except Exception:
             try:
                 self.Initialize('')
-            except e:
+            except:
                 raise
 
         # Get detector size and capabilities.
@@ -372,7 +378,7 @@ class Camera(object):
             # Use fan at full speed.
             self.SetFanMode(0)
         self.GetTemperatureRange(self.t_min, self.t_max)
-        
+
         # If a temperature is specified, then use it. Otherwise, hardware
         # default or previos value will be used.
         target_t = settings.get('targetTemperature')
@@ -382,9 +388,12 @@ class Camera(object):
                                         self.t_min.value,
                                         min(self.t_max.value, int(target_t)))
             self.SetTemperature(self.temperature_set_point)
-                
+
         # Turn the cooler on.
         self.CoolerON()
+
+        # Do not assume anything about the camera state: set everything.
+        self.update_settings(settings, init=True)
 
         # Set the exposure time if found in settings.
         t_exposure = settings.get('exposureTime')
@@ -467,6 +476,53 @@ class Camera(object):
             self.client = Pyro4.Proxy(uri)
             if self.data_thread is not None:
                 self.data_thread.set_client(self.client)
+
+
+    @with_camera
+    def update_settings(self, settings, init=False):
+        # Clear the flag so that our client will poll until it is True.
+        self.enabled = False
+        try:
+            # Stop whatever the camera was doing.
+            self.abort()
+        except Exception:
+            try:
+                self.Initialize('')
+            except:
+                raise
+
+        if init:
+            # Assume nothing about state: set everything.
+            # Update our settings with incoming settings.
+            update_keys = set(self.settings.keys())
+        else:
+            # Only update new and changed values.
+            my_keys = set(self.settings.keys())
+            their_keys = set(settings.keys())
+            update_keys = their_keys.union(
+                            set(key for key in
+                               my_keys.intersection(their_keys)
+                               if self.settings[key] != settings[key]))
+
+
+        # Update this cameras settings dict.
+        self.settings.update(settings)
+        for key in update_keys:
+            try:
+                func, argtype = SETTERS.get(key)
+                print func, argtype
+            except:
+                raise Exception("No setter specified for '%s'." % key)
+            else:
+                func(argtype(self.settings[key]))
+
+        # Recalculate and apply fastest vertical shift speed.
+        self.set_fastest_vs_speed()
+
+        # Set enabled indicator flag.
+        self.enabled = True
+        return self.enabled
+
 
 
     ### (Fairly) simple wrappers and utility functions. ###
@@ -618,6 +674,11 @@ class Camera(object):
 
 
     @with_camera
+    def set_em_gain(self, value):
+        return self.SetEMCCDGain(value)
+
+
+    @with_camera
     def set_exposure_time(self, exposure_time):
         """Set the exposure time and update vertical shift speed."""
         self.SetExposureTime(float(exposure_time))
@@ -625,7 +686,7 @@ class Camera(object):
         exposure, accumulate, kinetic = self.get_acquisition_timings()
         return exposure
 
-
+    @with_camera
     def set_fastest_vs_speed(self):
         """Update the vertical shift speed to fasted recommended speed."""
         (index, speed) = self.get_fastest_recommended_vs_speed()
@@ -683,7 +744,7 @@ class StatusThread(threading.Thread):
         self.status.port.value = port
         self.should_quit = False
 
-    
+
     def __del__(self):
         if self.is_alive:
             self.should_quit = True
@@ -754,7 +815,7 @@ if __name__ == '__main__':
     statuses = []
     sys.stdout.write('\033[2J') # Clear the terminal window.
     sys.stdout.write("Found %d cameras." % num_cameras.value)
-    
+
     for i in range(num_cameras.value):
         # For each camera we found ...
         # ... create a shared status object, ...
@@ -779,7 +840,7 @@ if __name__ == '__main__':
                 elif status.live.value and status.enabled.value:
                     sstr += '\033[42m' # green background
                 else:
-                    sstr += '\033[47m' # white background                 
+                    sstr += '\033[47m' # white background
                 # Show camera and PID
                 sstr += 'Cam%1d | PID%5d | ' % (i + 1, children[i].pid)
                 # Show port
@@ -804,7 +865,7 @@ if __name__ == '__main__':
             # Would be nice to save and restore the cursor position, but there
             # is no stock curses support under Windows.
             # Move cursor to top of console.
-            sys.stdout.write('\033[1;1H') 
+            sys.stdout.write('\033[1;1H')
             # Write out status.
             sys.stdout.write(sstr)
             # Reset colours.
