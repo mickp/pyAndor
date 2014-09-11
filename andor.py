@@ -32,7 +32,6 @@ import andorsdk as sdk
 import functools
 import numpy
 import Pyro4
-import re
 import sys
 import threading
 import time
@@ -45,10 +44,9 @@ from collections import namedtuple
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
 
-SETTERS = {
-    'exposureTime': ('SetExposureTime', float),
-    'EMGain': ('SetEMCCDGain', int),
-}
+## A lock to prevent concurrent calls to the DLL by different Cameras.
+dll_lock = threading.Lock()
+
 
 # Amplfier modes are defined by the AD channel, amplifier type,
 # and an index into the HSSpeed table.
@@ -58,7 +56,6 @@ SETTERS = {
 # Changed this - named tuple's can't work over Pyro.  Doesn't work as
 # class AmplifierMode(dict), either.  So just write a function that
 # returns the right dict.
-
 def AmplifierMode (label, channel, amplifier, index):
         return {'label': label,
                 'channel': channel,
@@ -87,8 +84,7 @@ AMPLIFIER_MODES = {
         ]
     }
 
-## A lock to prevent concurrent calls to the DLL by different Cameras.
-dll_lock = threading.Lock()
+
 
 def with_camera(func):
     """A decorator for camera functions.
@@ -166,6 +162,14 @@ class Camera(object):
     __metaclass__ = CameraMeta
 
 
+    # This dict is used to update camera settings un update_settings.
+    SETTERS = {
+        'exposureTime': ('SetExposureTime', float),
+        'EMGain': ('SetEMCCDGain', int),
+        'amplifierMode': ('set_amplifier_mode', AmplifierMode)
+    }
+
+
     def __enter__(self):
         """Context-manager entry."""
         return self
@@ -208,8 +212,6 @@ class Camera(object):
         self.armed = False
         # The current acquisition mode.
         self.acquistion_mode = None
-        # The current amplifier mode.
-        self.amplifier_mode = None
         # Temperature min. and max. possible values.
         self.t_min = c_int()
         self.t_max = c_int()
@@ -263,7 +265,7 @@ class Camera(object):
 
 
     @with_camera
-    def enable(self, settings):
+    def enable(self, settings={}):
         # Clear the flag so that our client will poll until it is True.
         self.enabled = False
         try:
@@ -303,7 +305,6 @@ class Camera(object):
 
         # Do not assume anything about the camera state: set everything.
         self.update_settings(settings, init=True)
-
 
         # Set the acquisition mode to single frame.
         self.set_acquisition_mode(1)
@@ -351,6 +352,11 @@ class Camera(object):
             return kinetics - exposure
 
 
+    def get_settings(self):
+        """Return the current settings dict. Useful for Pyro debug."""
+        return self.settings
+
+
     @with_camera
     def make_safe(self):
         """ Put the camera into a safe but active state."""
@@ -364,8 +370,10 @@ class Camera(object):
                                       sdk.AC_CAMERATYPE_IXONULTRA,
                                       sdk.AC_CAMERATYPE_NEWTON]:
             self.SetOutputAmplifier(1)
+            # This means the amplier mode is undefined.
+            self.settings.update({'amplifierMode': None})
 
-
+        self.enabled = False
 
 
     @with_camera
@@ -412,7 +420,7 @@ class Camera(object):
                                if self.settings[key] != settings[key]))
 
 
-        # Update this cameras settings dict.
+        # Update this camera's settings dict.
         self.settings.update(settings)
         for key in update_keys:
             try:
@@ -423,7 +431,10 @@ class Camera(object):
                 # There are some settings we don't handle.
             else:
                 func = getattr(self, funcstr)
-                func(argtype(self.settings[key]))
+                if not self.settings.get(key, None):
+                    func(None)
+                else:
+                    func(argtype(self.settings[key]))
 
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
@@ -580,10 +591,20 @@ class Camera(object):
 
     @with_camera
     def set_amplifier_mode(self, mode):
+        if mode == None:
+            mode = 0        
+        channel = int(mode['channel'])
+        amplifier = int(mode['amplifier'])
+        index = int(mode['index'])
         result = []
-        result.append(self.SetADChannel(mode.get('channel')))
-        result.append(self.SetOutputAmplifier(mode.get('amplifier')))
-        result.append(self.SetHSSpeed(mode.get('amplifier'), mode.get('speed')))
+        try:
+            result.append(self.SetADChannel(channel))
+            result.append(self.SetOutputAmplifier(amplifier))
+            result.append(self.SetHSSpeed(amplifier, index))
+        except Exception as e:
+            return e.__repr__()
+        else:
+            self.settings.update({'amplifierMode': mode})
 
 
     @with_camera
@@ -655,7 +676,7 @@ class DataThread(threading.Thread):
 
 
 class StatusThread(threading.Thread):
-    """A thread to maintain a status string."""
+    """A thread to maintain a status object."""
     def __init__(self, cam, port, status):
         threading.Thread.__init__(self)
         self.cam = cam
@@ -699,7 +720,12 @@ class StatusThread(threading.Thread):
                 self.status.armed.value = self.cam.armed
                 self.status.count.value = self.cam.count
 
-                self.status.EMGain.value = self.cam.settings.get('EMGain', 0)
+                self.status.gain.value = self.cam.settings.get('EMGain', 0)
+                try:
+                    is_em = self.cam.settings['amplifierMode']['amplifier'] == 0
+                except:
+                    is_em = False
+                self.status.em.value = is_em
 
             time.sleep(1)
 
@@ -715,18 +741,17 @@ class StatusObject(object):
         self.ready = Value(c_bool)
         self.serial = Value(c_int)
         self.temperature = Value(c_int)
-        self.EMGain = Value(c_int)
+        self.gain = Value(c_int)
         # These values are False until we find otherwise.
         self.valid_temperature = Value(c_bool, False)
         self.live = Value(c_bool, False)
+        self.em = Value(c_bool, False)
 
 
 class CameraManager(object):
-    """A class to manage Camera instances.
+    """A class to manage Camera instances in a single process.
 
-    This used to be handled by class variables and class methods, but
-    that approach will not work when we need to spread several cameras
-    over separate processes.
+    Useful for debugging.
     """
     def __init__(self):
         # Map handle values to camera instances
@@ -826,51 +851,6 @@ class CameraServer(Process):
 
 
 
-def report_status(status_list):
-    labels = ('ID', 'PID', 'port', 'enab', 'ready', 
-              'armed', 'temp', 'count', 'gain')
-    
-    format_str = '|'.join(['%%%ds' % (len(label) + 2) for label in labels])
-    format_str += '\n'
-
-    # Would be nice to save and restore the cursor position, but there
-    # is no stock curses support under Windows.
-    # Move cursor to top of console.
-    sys.stdout.write('\033[1;1H')
-
-    # Generate and display a header row.
-    sstr = format_str % labels
-    sys.stdout.write(sstr)
-
-    # Generate and display a status row for each status.
-    for i, status in enumerate(statuses):
-        sstr = ''
-        sstr += '\033[30m' #and Black foreground
-        if not status.live.value:
-            sstr += '\033[41m' # red background
-        elif status.live.value and not status.enabled.value:
-            sstr += '\033[43m' # yellow background
-        elif status.live.value and status.enabled.value:
-            sstr += '\033[42m' # green background
-        else:
-            sstr += '\033[47m' # white background
-        sstr += format_str % (
-            status.serial.value,
-            status.pid.value,
-            status.port.value,
-            status.enabled.value,
-            status.ready.value,
-            status.armed.value,
-            status.temperature.value if status.valid_temperature.value else '???',
-            status.count.value,
-            status.EMGain.value,)
-        sys.stdout.write(sstr)
-    # Reset colours.
-    sys.stdout.write('\033[39m\033[49m')
-    # Move cursor down a few rows.
-    sys.stdout.write('\033[%d;1H' % (num_cameras.value + 4))
-    time.sleep(0.5)
-
 if __name__ == '__main__':
     """ If called from the command line, create CameraServers.
 
@@ -879,8 +859,54 @@ if __name__ == '__main__':
     separate processes.  Hopefully, this will prevent any delay each
     time we connect to the camera from cockpit.
     """
-    # Fix for a win32 and colorama bug
+    def report_status(status_list):
+        labels = ('ID', 'PID', 'port', 'enab', 'ready', 
+                  'armed', 'temp', 'count', 'gain')
+        
+        format_str = '|'.join(['%%%ds' % (len(label) + 2) for label in labels])
+        format_str += '\n'
+
+        # Would be nice to save and restore the cursor position, but there
+        # is no stock curses support under Windows.
+        # Move cursor to top of console.
+        sys.stdout.write('\033[1;1H')
+
+        # Generate and display a header row.
+        sstr = format_str % labels
+        sys.stdout.write(sstr)
+
+        # Generate and display a status row for each status.
+        for i, status in enumerate(statuses):
+            sstr = ''
+            sstr += '\033[30m' #and Black foreground
+            if not status.live.value:
+                sstr += '\033[41m' # red background
+            elif status.live.value and not status.enabled.value:
+                sstr += '\033[43m' # yellow background
+            elif status.live.value and status.enabled.value:
+                sstr += '\033[42m' # green background
+            else:
+                sstr += '\033[47m' # white background
+            sstr += format_str % (
+                status.serial.value,
+                status.pid.value,
+                status.port.value,
+                status.enabled.value,
+                status.ready.value,
+                status.armed.value,
+                status.temperature.value if status.valid_temperature.value else '???',
+                status.count.value,
+                'EM%d' % status.gain.value if status.em.value else 'Conv',)
+            sys.stdout.write(sstr)
+        # Reset colours.
+        sys.stdout.write('\033[39m\033[49m')
+        # Move cursor down a few rows.
+        sys.stdout.write('\033[%d;1H' % (num_cameras.value + 4))
+        time.sleep(0.5)
+
+
     import colorama
+    # Fix for a win32 and colorama bug
     try:
         test = colorama.Win32.COORD(0,0)
     except:
