@@ -139,110 +139,6 @@ def sdk_call(func):
     return sdk_wrapper
 
 
-class CameraManager(object):
-    """A class to manage Camera instances.
-
-    This used to be handled by class variables and class methods, but
-    that approach will not work when we need to spread several cameras
-    over separate processes.
-    """
-    def __init__(self):
-        # Map handle values to camera instances
-        self.handle_to_camera = {}
-        # A list of camera instances
-        self.cameras = []
-        self.num_cameras = c_long()
-        sdk.GetAvailableCameras(self.num_cameras)
-
-
-    def update_cameras(self):
-        """Search for cameras and create Camera instances.
-
-        Camera instances are tracked in the class variables
-        Camera.cameralist and Camera.handle_to_camera.
-        """
-        for cam in self.cameras:
-            self.cameras.remove(cam)
-
-        num_cameras = c_long()
-        sdk.GetAvailableCameras(num_cameras)
-
-        for i in range(num_cameras.value):
-            handle = c_long()
-            sdk.GetCameraHandle(i, handle)
-            self.cameras.append(Camera(handle))
-            self.handle_to_camera.update({handle.value: i})
-
-
-class CameraServer(Process):
-    """A class to serve Camera objects over Pyro."""
-    def __init__(self, index, status=None):
-        super(CameraServer, self).__init__()
-        # daemon=True means that this process will be terminated with parent.
-        self.daemon = True
-        self.index = index
-        #TODO - should read serial_to_* from config file.
-        self.serial_to_host = {9145: '127.0.0.1', 9146: '127.0.0.1'}
-        self.serial_to_port = {9145: 7776, 9146: 7777}
-        self.cam = None
-        self.status = status
-
-
-    def run(self):
-        self.serve()
-
-
-    def serve(self):
-        ## This works for each camera ... once.  If a process is
-        # terminated then you try and create a new process for the same
-        # camera, the SDK will not succesfully Initialize.
-
-        # TODO: I think we may need to call Shutdown before the
-        # process exits ... but Process.terminate kills it right away,
-        # so we probaly need to stop the Pyro Daemon, then call
-        # Shutdown, then return / join the main process.
-        serial = None
-        num_cameras = c_long()
-        handle = c_long()
-
-        sdk.GetAvailableCameras(num_cameras)
-        if self.index >= num_cameras.value:
-            raise Exception(
-                "Camera index %d too large: I only have %d cameras."
-                % (self.index, num_cameras.value))
-
-        sdk.GetCameraHandle(self.index, handle)
-
-        # SetCurrentCamera once, and create Camera with singleton=True:
-        # this is the only camera in this process, so we don't need to
-        # SetCurrentCamera and lock for each Camera method.
-        sdk.SetCurrentCamera(handle)
-
-        self.cam = Camera(handle, singleton=True)
-        self.cam.Initialize('')
-        serial = self.cam.get_camera_serial_number()
-
-        if not self.serial_to_host.has_key(serial):
-            raise Exception("No host found for camera with serial number %s."
-                                % serial)
-
-        if not self.serial_to_port.has_key(serial):
-            raise Exception("No host found for camera with serial number %s."
-                                % serial)
-
-        host = self.serial_to_host[serial]
-        port = self.serial_to_port[serial]
-
-        if self.status:
-            self.status.pid = self.pid
-            status_thread = StatusThread(self.cam, port, self.status)
-            status_thread.start()
-
-        daemon = Pyro4.Daemon(port=port, host=host)
-        Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
-                                 daemon=daemon, ns=False, verbose=True)
-
-
 class CameraMeta(type):
     """A metaclass that adds DLL methods to the Camera class.
 
@@ -823,6 +719,111 @@ class StatusObject(object):
         # These values are False until we find otherwise.
         self.valid_temperature = Value(c_bool, False)
         self.live = Value(c_bool, False)
+
+
+class CameraManager(object):
+    """A class to manage Camera instances.
+
+    This used to be handled by class variables and class methods, but
+    that approach will not work when we need to spread several cameras
+    over separate processes.
+    """
+    def __init__(self):
+        # Map handle values to camera instances
+        self.handle_to_camera = {}
+        # A list of camera instances
+        self.cameras = []
+        self.num_cameras = c_long()
+        sdk.GetAvailableCameras(self.num_cameras)
+
+
+    def update_cameras(self):
+        """Search for cameras and create Camera instances.
+
+        Camera instances are tracked in the class variables
+        Camera.cameralist and Camera.handle_to_camera.
+        """
+        for cam in self.cameras:
+            self.cameras.remove(cam)
+
+        num_cameras = c_long()
+        sdk.GetAvailableCameras(num_cameras)
+
+        for i in range(num_cameras.value):
+            handle = c_long()
+            sdk.GetCameraHandle(i, handle)
+            self.cameras.append(Camera(handle))
+            self.handle_to_camera.update({handle.value: i})
+
+
+class CameraServer(Process):
+    """A class to serve Camera objects over Pyro."""
+    def __init__(self, index, status=None):
+        super(CameraServer, self).__init__()
+        # daemon=True means that this process will be terminated with parent.
+        self.daemon = True
+        self.index = index
+        #TODO - should read serial_to_* from config file.
+        self.serial_to_host = {9145: '127.0.0.1', 9146: '127.0.0.1'}
+        self.serial_to_port = {9145: 7776, 9146: 7777}
+        self.cam = None
+        self.status = status
+
+
+    def run(self):
+        self.serve()
+
+
+    def serve(self):
+        ## This works for each camera ... once.  If a process is
+        # terminated then you try and create a new process for the same
+        # camera, the SDK will not succesfully Initialize.
+
+        # TODO: I think we may need to call Shutdown before the
+        # process exits ... but Process.terminate kills it right away,
+        # so we probaly need to stop the Pyro Daemon, then call
+        # Shutdown, then return / join the main process.
+        serial = None
+        num_cameras = c_long()
+        handle = c_long()
+
+        sdk.GetAvailableCameras(num_cameras)
+        if self.index >= num_cameras.value:
+            raise Exception(
+                "Camera index %d too large: I only have %d cameras."
+                % (self.index, num_cameras.value))
+
+        sdk.GetCameraHandle(self.index, handle)
+
+        # SetCurrentCamera once, and create Camera with singleton=True:
+        # this is the only camera in this process, so we don't need to
+        # SetCurrentCamera and lock for each Camera method.
+        sdk.SetCurrentCamera(handle)
+
+        self.cam = Camera(handle, singleton=True)
+        self.cam.Initialize('')
+        serial = self.cam.get_camera_serial_number()
+
+        if not self.serial_to_host.has_key(serial):
+            raise Exception("No host found for camera with serial number %s."
+                                % serial)
+
+        if not self.serial_to_port.has_key(serial):
+            raise Exception("No host found for camera with serial number %s."
+                                % serial)
+
+        host = self.serial_to_host[serial]
+        port = self.serial_to_port[serial]
+
+        if self.status:
+            self.status.pid = self.pid
+            status_thread = StatusThread(self.cam, port, self.status)
+            status_thread.start()
+
+        daemon = Pyro4.Daemon(port=port, host=host)
+        Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
+                                 daemon=daemon, ns=False, verbose=True)
+
 
 
 def report_status(status_list):
