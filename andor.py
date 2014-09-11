@@ -162,14 +162,6 @@ class Camera(object):
     __metaclass__ = CameraMeta
 
 
-    # This dict is used to update camera settings un update_settings.
-    SETTERS = {
-        'exposureTime': ('SetExposureTime', float),
-        'EMGain': ('SetEMCCDGain', int),
-        'amplifierMode': ('set_amplifier_mode', AmplifierMode)
-    }
-
-
     def __enter__(self):
         """Context-manager entry."""
         return self
@@ -304,6 +296,13 @@ class Camera(object):
         self.CoolerON()
 
         # Do not assume anything about the camera state: set everything.
+        # If this is the first call to enable, the amplifier mode is not 
+        # yet defined.
+        if not settings.get('amplifierMode', None):
+            if not self.settings.get('amplifierMode', None):
+                # Amplfier mode isn't set either in existing or new settings.
+                # Set it to None, so that set the default mode.
+                self.settings.update({'amplifierMode': None})
         self.update_settings(settings, init=True)
 
         # Set the acquisition mode to single frame.
@@ -409,6 +408,7 @@ class Camera(object):
         if init:
             # Assume nothing about state: set everything.
             # Update our settings with incoming settings.
+            self.settings.update(settings)
             update_keys = set(self.settings.keys())
         else:
             # Only update new and changed values.
@@ -419,23 +419,19 @@ class Camera(object):
                                my_keys.intersection(their_keys)
                                if self.settings[key] != settings[key]))
 
-
         # Update this camera's settings dict.
         self.settings.update(settings)
-        for key in update_keys:
-            try:
-                funcstr, argtype = SETTERS.get(key)
-            except:
-                # raise Exception("No setter specified for '%s'." % key)
-                pass
-                # There are some settings we don't handle.
-            else:
-                func = getattr(self, funcstr)
-                if not self.settings.get(key, None):
-                    func(None)
-                else:
-                    func(argtype(self.settings[key]))
 
+        # Apply changed settings to the hardware.
+        for key in update_keys:
+            val = self.settings.get(key, None)
+            if key == 'exposureTime':
+                self.SetExposureTime(float(val))
+            elif key == 'EMGain':
+                self.SetEMCCDGain(int(val))
+            elif key == 'amplifierMode':
+                self.set_amplifier_mode(val)
+    
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
 
@@ -591,8 +587,9 @@ class Camera(object):
 
     @with_camera
     def set_amplifier_mode(self, mode):
+        # If no mode was specified, use the first mode."""
         if mode == None:
-            mode = 0        
+            mode = self.get_amplifier_modes()[0]    
         channel = int(mode['channel'])
         amplifier = int(mode['amplifier'])
         index = int(mode['index'])
@@ -841,7 +838,7 @@ class CameraServer(Process):
         port = self.serial_to_port[serial]
 
         if self.status:
-            self.status.pid = self.pid
+            self.status.pid.value = self.pid
             status_thread = StatusThread(self.cam, port, self.status)
             status_thread.start()
 
