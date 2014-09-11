@@ -46,8 +46,8 @@ from collections import namedtuple
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
 
 SETTERS = {
-    'exposureTime': (sdk.SetExposureTime, float),
-    'EMGain': (sdk.SetEMCCDGain, int),
+    'exposureTime': ('SetExposureTime', float),
+    'EMGain': ('SetEMCCDGain', int),
 }
 
 # Amplfier modes are defined by the AD channel, amplifier type,
@@ -55,26 +55,35 @@ SETTERS = {
 # I use a list of tuples if label and mode to preserve the label order:
 # to preserve this order in an OrderedDict, each mode would have to be
 # added individually, making it more difficult both to read or edit.
-AmplifierMode = namedtuple('AmplifierMode', ['channel', 'type', 'index'])
+# Changed this - named tuple's can't work over Pyro.  Doesn't work as
+# class AmplifierMode(dict), either.  So just write a function that
+# returns the right dict.
+
+def AmplifierMode (label, channel, amplifier, index):
+        return {'label': label,
+                'channel': channel,
+                'amplifier': amplifier,
+                'index': index}
+
 AMPLIFIER_MODES = {
     sdk.AC_CAMERATYPE_IXONULTRA: [
         # Verified against the hardware.
-        ('EM 1MHz'   , AmplifierMode(0, 0, 3)),
-        ('EM 5MHz'   , AmplifierMode(0, 0, 2)),
-        ('EM 10MHz'  , AmplifierMode(0, 0, 1)),
-        ('EM 17MHz'  , AmplifierMode(0, 0, 0)),
-        ('Conv 80kHz', AmplifierMode(0, 1, 2)),
-        ('Conv 1MHz' , AmplifierMode(0, 1, 1)),
-        ('Conv 3MHz' , AmplifierMode(0, 1, 0)),
+        AmplifierMode('EM 1MHz'   , 0, 0, 3),
+        AmplifierMode('EM 5MHz'   , 0, 0, 2),
+        AmplifierMode('EM 10MHz'  , 0, 0, 1),
+        AmplifierMode('EM 17MHz'  , 0, 0, 0),
+        AmplifierMode('Conv 80kHz', 0, 1, 2),
+        AmplifierMode('Conv 1MHz' , 0, 1, 1),
+        AmplifierMode('Conv 3MHz' , 0, 1, 0),
         ],
     sdk.AC_CAMERATYPE_IXON: [
         # Needs to be verified.
-        ('EM16 1MHz'   , AmplifierMode(1, 0, 0)),
-        ('EM14 3MHz'   , AmplifierMode(0, 0, 0)),
-        ('EM14 5MHz'   , AmplifierMode(0, 0, 1)),
-        ('EM14 10MHz'  , AmplifierMode(0, 0, 2)),
-        ('Conv16 1MHz' , AmplifierMode(1, 1, 0)),
-        ('Conv16 3MHz' , AmplifierMode(0, 1, 0)),
+        AmplifierMode('EM16 1MHz'   , 1, 0, 0),
+        AmplifierMode('EM14 3MHz'   , 0, 0, 0),
+        AmplifierMode('EM14 5MHz'   , 0, 0, 1),
+        AmplifierMode('EM14 10MHz'  , 0, 0, 2),
+        AmplifierMode('Conv16 1MHz' , 1, 1, 0),
+        AmplifierMode('Conv16 3MHz' , 0, 1, 0),
         ]
     }
 
@@ -177,6 +186,7 @@ class CameraServer(Process):
         self.serial_to_port = {9145: 7776, 9146: 7777}
         self.cam = None
         self.status = status
+
 
     def run(self):
         self.serve()
@@ -301,6 +311,8 @@ class Camera(object):
         self.armed = False
         # The current acquisition mode.
         self.acquistion_mode = None
+        # The current amplifier mode.
+        self.amplifier_mode = None
         # Temperature min. and max. possible values.
         self.t_min = c_int()
         self.t_max = c_int()
@@ -395,10 +407,6 @@ class Camera(object):
         # Do not assume anything about the camera state: set everything.
         self.update_settings(settings, init=True)
 
-        # Set the exposure time if found in settings.
-        t_exposure = settings.get('exposureTime')
-        if t_exposure:
-            self.set_exposure_time(float(t_exposure))
 
         # Set the acquisition mode to single frame.
         self.set_acquisition_mode(1)
@@ -461,6 +469,8 @@ class Camera(object):
             self.SetOutputAmplifier(1)
 
 
+
+
     @with_camera
     def prepare(self, experiment):
         """Prepare the camera for data acquisition."""
@@ -509,11 +519,13 @@ class Camera(object):
         self.settings.update(settings)
         for key in update_keys:
             try:
-                func, argtype = SETTERS.get(key)
-                print func, argtype
+                funcstr, argtype = SETTERS.get(key)
             except:
-                raise Exception("No setter specified for '%s'." % key)
+                # raise Exception("No setter specified for '%s'." % key)
+                pass
+                # There are some settings we don't handle.
             else:
+                func = getattr(self, funcstr)
                 func(argtype(self.settings[key]))
 
         # Recalculate and apply fastest vertical shift speed.
@@ -547,7 +559,9 @@ class Camera(object):
         if not self.caps.ulCameraType:
             self.get_capabilities()
         # Return the amplifier mode labels.
-        return [mode[0] for mode in AMPLIFIER_MODES[self.caps.ulCameraType]]
+        modes = AMPLIFIER_MODES[self.caps.ulCameraType]
+        
+        return modes
 
 
     @with_camera
@@ -668,6 +682,14 @@ class Camera(object):
 
 
     @with_camera
+    def set_amplifier_mode(self, mode):
+        result = []
+        result.append(self.SetADChannel(mode.get('channel')))
+        result.append(self.SetOutputAmplifier(mode.get('amplifier')))
+        result.append(self.SetHSSpeed(mode.get('amplifier'), mode.get('speed')))
+
+
+    @with_camera
     def set_acquisition_mode(self, mode):
         self.SetAcquisitionMode(mode)
         self.acquisition_mode = mode
@@ -779,13 +801,15 @@ class StatusThread(threading.Thread):
                 self.status.ready.value = self.cam.ready
                 self.status.armed.value = self.cam.armed
                 self.status.count.value = self.cam.count
+
+                self.status.EMGain.value = self.cam.settings.get('EMGain', 0)
+
             time.sleep(1)
 
 
 class StatusObject(object):
     """StatusObject is used to share camera status between processes."""
     def __init__(self):
-        # Need to use c_int for bools, as c_bool is unhashable.
         self.armed = Value(c_bool)
         self.enabled = Value(c_bool)
         self.count = Value(c_int)
@@ -793,6 +817,7 @@ class StatusObject(object):
         self.ready = Value(c_bool)
         self.serial = Value(c_int)
         self.temperature = Value(c_int)
+        self.EMGain = Value(c_int)
         # These values are False until we find otherwise.
         self.valid_temperature = Value(c_bool, False)
         self.live = Value(c_bool, False)
