@@ -32,6 +32,8 @@ import andorsdk as sdk
 import functools
 import numpy
 import Pyro4
+Pyro4.config.SERIALIZER = 'pickle'
+Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
 import sys
 import threading
 import time
@@ -225,17 +227,25 @@ class Camera(object):
     @with_camera
     def arm(self):
         if not self.is_ready():
-            raise Exception("Camera not ready.")
+            pass
+        #    raise Exception("Camera not ready.")
 
         # Open the shutter.
         # SetShutter(type, mode, t_close_ms, t_open_ms)
         # type = 0: TTL high = open; 1: TTL low = open
         # mode = 0: auto, 1: open; 2: closed
         self.SetShutter(1, 1, 1, 1)
+        self.SetReadMode(4)
+        self.SetImage(1, 1, 1, self.nx, 1, self.ny)
 
         # Reset image count and set armed.
         self.count = 0
         self.armed = True
+
+        # Make sure there is a data thread running.
+        if not self.data_thread or not self.data_thread.is_alive():
+            self.data_thread = DataThread(self, self.client)
+            self.data_thread.start()
 
         # Set camera to espond to triggers.
         self.StartAcquisition()
@@ -249,6 +259,9 @@ class Camera(object):
         except:
             pass
         self.make_safe()
+        if self.data_thread:
+            self.data_thread.should_quit = True
+            self.data_thread.join()
         # Could call self.Shutdown here, but that would require slow
         # AD calibration on next enable.
         # TODO: figure out where to call ShutDown before exit / on
@@ -259,7 +272,8 @@ class Camera(object):
     @with_camera
     def enable(self, settings={}):
         # Clear the flag so that our client will poll until it is True.
-        self.enabled = False
+        self.disable()
+
         try:
             # Stop whatever the camera was doing.
             self.abort()
@@ -309,13 +323,16 @@ class Camera(object):
         self.set_acquisition_mode(1)
 
         # Enable external triggering.
-        self.SetTriggerMode(1)
+        self.SetTriggerMode(0)
 
         # Recalculate VS speed.
         self.set_fastest_vs_speed()
 
         # Set enabled indicator flag.
         self.enabled = True
+
+        self.arm()
+
         return self.enabled
 
 
@@ -633,7 +650,7 @@ class Camera(object):
 
 class DataThread(threading.Thread):
     """A thread to collect acquired data and dispatch it to a client."""
-    def __init__(self, cam):
+    def __init__(self, cam, client):
         threading.Thread.__init__(self)
         self.skip_next_n_images = 0
         self.exposure_count = 0
@@ -642,6 +659,7 @@ class DataThread(threading.Thread):
         self.cam = weakref.proxy(cam)
         self.image_array = numpy.zeros((cam.nx, cam.ny), dtype=numpy.uint16)
         self.n_pixels = cam.nx * cam.ny
+        self.client = client
 
 
     def __del__(self):
@@ -659,8 +677,9 @@ class DataThread(threading.Thread):
 
             if result == sdk.DRV_SUCCESS:
                 timestamp = 0 # TODO - fix timestamp.
-                cam.count += 1
+                self.cam.count += 1
                 if self.client is not None:
+                    print '\n\n\n\n\nSent image.\n\n\n'
                     self.client.receiveData('new image',
                                              self.image_array,
                                              timestamp)
