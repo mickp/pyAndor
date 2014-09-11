@@ -234,6 +234,7 @@ class CameraServer(Process):
         port = self.serial_to_port[serial]
 
         if self.status:
+            self.status.pid = self.pid
             status_thread = StatusThread(self.cam, port, self.status)
             status_thread.start()
 
@@ -810,6 +811,7 @@ class StatusThread(threading.Thread):
 class StatusObject(object):
     """StatusObject is used to share camera status between processes."""
     def __init__(self):
+        self.pid = Value(c_int)
         self.armed = Value(c_bool)
         self.enabled = Value(c_bool)
         self.count = Value(c_int)
@@ -822,6 +824,51 @@ class StatusObject(object):
         self.valid_temperature = Value(c_bool, False)
         self.live = Value(c_bool, False)
 
+
+def report_status(status_list):
+    labels = ('ID', 'PID', 'port', 'enab', 'ready', 
+              'armed', 'temp', 'count', 'gain')
+    
+    format_str = '|'.join(['%%%ds' % (len(label) + 2) for label in labels])
+    format_str += '\n'
+
+    # Would be nice to save and restore the cursor position, but there
+    # is no stock curses support under Windows.
+    # Move cursor to top of console.
+    sys.stdout.write('\033[1;1H')
+
+    # Generate and display a header row.
+    sstr = format_str % labels
+    sys.stdout.write(sstr)
+
+    # Generate and display a status row for each status.
+    for i, status in enumerate(statuses):
+        sstr = ''
+        sstr += '\033[30m' #and Black foreground
+        if not status.live.value:
+            sstr += '\033[41m' # red background
+        elif status.live.value and not status.enabled.value:
+            sstr += '\033[43m' # yellow background
+        elif status.live.value and status.enabled.value:
+            sstr += '\033[42m' # green background
+        else:
+            sstr += '\033[47m' # white background
+        sstr += format_str % (
+            status.serial.value,
+            status.pid.value,
+            status.port.value,
+            status.enabled.value,
+            status.ready.value,
+            status.armed.value,
+            status.temperature.value if status.valid_temperature.value else '???',
+            status.count.value,
+            status.EMGain.value,)
+        sys.stdout.write(sstr)
+    # Reset colours.
+    sys.stdout.write('\033[39m\033[49m')
+    # Move cursor down a few rows.
+    sys.stdout.write('\033[%d;1H' % (num_cameras.value + 4))
+    time.sleep(0.5)
 
 if __name__ == '__main__':
     import colorama
@@ -854,51 +901,11 @@ if __name__ == '__main__':
 
     try:
         while True:
-            # Generate a status string.
-            sstr = ''
-            for i, status in enumerate(statuses):
-                sstr += '\033[30m' #and Black foreground
-                if not status.live.value:
-                    sstr += '\033[41m' # red background
-                elif status.live.value and not status.enabled.value:
-                    sstr += '\033[43m' # yellow background
-                elif status.live.value and status.enabled.value:
-                    sstr += '\033[42m' # green background
-                else:
-                    sstr += '\033[47m' # white background
-                # Show camera and PID
-                sstr += 'Cam%1d | PID%5d | ' % (i + 1, children[i].pid)
-                # Show port
-                sstr += 'PORT%6d | ' % status.port.value
-                # Show state
-                sstr += 'Enab %5s | Ready %5s | Armed %5s | ' % (
-                        status.enabled.value,
-                        status.ready.value,
-                        status.armed.value)
-                # Show temperature
-                sstr += 'Temp '
-                if status.valid_temperature.value:
-                    sstr += '%3d | ' % status.temperature.value
-                else:
-                    sstr += '??? | '
-
-                # Show count of images since last call to cam.arm.
-                sstr += "Count %5d." % status.count.value
-
-                # New line
-                sstr += '\n'
-            # Would be nice to save and restore the cursor position, but there
-            # is no stock curses support under Windows.
-            # Move cursor to top of console.
-            sys.stdout.write('\033[1;1H')
-            # Write out status.
-            sys.stdout.write(sstr)
-            # Reset colours.
-            sys.stdout.write('\033[39m\033[49m')
-            # Move cursor down a few rows.
-            sys.stdout.write('\033[%d;1H' % (num_cameras.value + 2))
-            # Wait 1s between updates.
-            time.sleep(1)
+            if statuses:
+                report_status(statuses)
+            else:
+                # nothing to do.
+                pass
     finally:
         for c in children:
             # As this process exits, clean up child processes.
