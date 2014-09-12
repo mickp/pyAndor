@@ -937,12 +937,10 @@ if __name__ == '__main__':
             sstr += '\033[30m' #and Black foreground
             if not status.live.value:
                 sstr += '\033[41m' # red background
-            elif status.live.value and not status.enabled.value:
+            elif not status.enabled.value:
                 sstr += '\033[43m' # yellow background
-            elif status.live.value and status.enabled.value:
-                sstr += '\033[42m' # green background
             else:
-                sstr += '\033[47m' # white background
+                sstr += '\033[42m' # green background
             sstr += format_str % (
                 status.serial.value,
                 status.pid.value,
