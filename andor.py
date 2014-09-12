@@ -702,9 +702,15 @@ class DataThread(threading.Thread):
                 timestamp = 0 # TODO - fix timestamp.
                 self.cam.count += 1
                 if self.client is not None:
-                    self.client.receiveData('new image',
-                                             self.image_array,
-                                             timestamp)
+                    try:
+                        self.client.receiveData('new image',
+                                                 self.image_array,
+                                                 timestamp)
+                    except Pyro4.errors.ConnectionClosedError:
+                        # No-one is listening.
+                            self.cam.abort()
+                            self.should_quit = True
+
             else:
                 time.sleep(0.01)
 
