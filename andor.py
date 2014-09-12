@@ -45,6 +45,13 @@ from collections import namedtuple
 
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
+TRIGGERS = {-1: 'off',
+            0: 'internal',
+            1: 'external',
+            6: 'ex-start',
+            7: 'ex-bulb',
+            10: 'software',
+            12: 'ex-chrge'}
 
 ## A lock to prevent concurrent calls to the DLL by different Cameras.
 dll_lock = threading.Lock()
@@ -180,13 +187,17 @@ class Camera(object):
             # May raise exception if camera never initialized - not a problem.
             pass
         self.enabled = False
-        self.armed = False
-        self.ready = False
+        self.triggering = None
+
+
+    @with_camera
+    def __del__(self):
+        self.ShutDown()
 
 
     def __init__(self, handle, singleton=False):
         """Init a Camera instance for hardware with ID=handle."""
-        # Number of exposures fetched since last armed.
+        # Number of exposures fetched since last StartAcquisition.
         self.count = 0
         # SDK's handle for the camera
         self.handle = handle
@@ -200,28 +211,21 @@ class Camera(object):
         self.singleton = singleton
         # Is the camera enabled?
         self.enabled = False
-        # Is the camera ready?
-        self.ready = False
         # Is the camera armed to respond to triggers?
-        self.armed = False
+        self.triggering = None
         # The current acquisition mode.
         self.acquistion_mode = None
-        # Temperature min. and max. possible values.
-        self.t_min = c_int()
-        self.t_max = c_int()
-        # Temperature set point and threshold.
-        self.temperature_set_point = c_int()
-        self.temperature_state = None
         # Thread to handle data on exposure
         self.data_thread = None
         self.settings = {}
+        self.client = None
 
 
     ### Client functions. ###
     @with_camera
     def abort(self):
         self.AbortAcquisition()
-        self.ready = False
+        self.triggering = None
 
 
     @with_camera
@@ -235,12 +239,17 @@ class Camera(object):
         # type = 0: TTL high = open; 1: TTL low = open
         # mode = 0: auto, 1: open; 2: closed
         self.SetShutter(1, 1, 1, 1)
+        # SetReadMode to image.
         self.SetReadMode(4)
+        # Set image to full sensor.
         self.SetImage(1, 1, 1, self.nx, 1, self.ny)
 
-        # Reset image count and set armed.
+        # Enable external triggering
+        self.SetTriggerMode(1)
+        self.triggering = 1
+
+        # Reset image count.
         self.count = 0
-        self.armed = True
 
         # Make sure there is a data thread running.
         if not self.data_thread or not self.data_thread.is_alive():
@@ -294,17 +303,13 @@ class Camera(object):
         else:
             # Use fan at full speed.
             self.SetFanMode(0)
-        self.GetTemperatureRange(self.t_min, self.t_max)
 
         # If a temperature is specified, then use it. Otherwise, hardware
         # default or previos value will be used.
-        target_t = settings.get('targetTemperature')
-        if target_t is not None:
-            # Temperature set-point is limited to available range.
-            self.temperature_set_point.value = max(
-                                        self.t_min.value,
-                                        min(self.t_max.value, int(target_t)))
-            self.SetTemperature(self.temperature_set_point)
+        target_temperature = settings.get('targetTemperature')
+        if target_temperature is not None:
+            self.set_target_temperature(target_temperature)
+
 
         # Turn the cooler on.
         self.CoolerON()
@@ -319,11 +324,8 @@ class Camera(object):
                 self.settings.update({'amplifierMode': None})
         self.update_settings(settings, init=True)
 
-        # Set the acquisition mode to single frame.
-        self.set_acquisition_mode(1)
-
-        # Enable external triggering.
-        self.SetTriggerMode(0)
+        # Set the acquisition mode to run until abort with frame transfer.
+        self.set_acquisition_mode(7)
 
         # Recalculate VS speed.
         self.set_fastest_vs_speed()
@@ -411,6 +413,8 @@ class Camera(object):
 
     @with_camera
     def update_settings(self, settings, init=False):
+        # Store the triggering state on entry.
+        triggering_on_entry = self.triggering
         # Clear the flag so that our client will poll until it is True.
         self.enabled = False
         try:
@@ -448,12 +452,20 @@ class Camera(object):
                 self.SetEMCCDGain(int(val))
             elif key == 'amplifierMode':
                 self.set_amplifier_mode(val)
+            elif key == 'targetTemperature':
+                self.set_target_temperature(val)
     
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
 
         # Set enabled indicator flag.
         self.enabled = True
+
+        # If the camera was responding to triggers, restart acquisition.
+        if triggering_on_entry is not None:
+            self.triggering = triggering_on_entry
+            self.StartAcquisition()
+
         return self.enabled
 
 
@@ -598,8 +610,8 @@ class Camera(object):
     @with_camera
     def is_ready(self):
         status = self.GetTemperature(c_int())
-        self.ready = (status == sdk.DRV_TEMP_STABILIZED) and self.enabled
-        return self.ready
+        ready = (status == sdk.DRV_TEMP_STABILIZED) and self.enabled
+        return ready
 
 
     @with_camera
@@ -648,6 +660,17 @@ class Camera(object):
         return speed
 
 
+    @with_camera
+    def set_target_temperature(self, target):
+        t_min = c_int()
+        t_max = c_int()
+        self.GetTemperatureRange(t_min, t_max)
+        # Temperature set-point is limited to available range.
+        target = max(t_min.value, min(t_max.value, target))
+        self.SetTemperature(target)
+
+
+
 class DataThread(threading.Thread):
     """A thread to collect acquired data and dispatch it to a client."""
     def __init__(self, cam, client):
@@ -675,11 +698,10 @@ class DataThread(threading.Thread):
             except:
                 raise
 
-            if result == sdk.DRV_SUCCESS:
+            if result[0] == sdk.DRV_SUCCESS:
                 timestamp = 0 # TODO - fix timestamp.
                 self.cam.count += 1
                 if self.client is not None:
-                    print '\n\n\n\n\nSent image.\n\n\n'
                     self.client.receiveData('new image',
                                              self.image_array,
                                              timestamp)
@@ -687,7 +709,7 @@ class DataThread(threading.Thread):
                 time.sleep(0.01)
 
 
-    def set_client(client):
+    def set_client(self, client):
         self.client = client
 
 
@@ -732,9 +754,11 @@ class StatusThread(threading.Thread):
                     self.status.temperature.value = temperature
 
                 self.status.enabled.value = self.cam.enabled
-                self.status.ready.value = self.cam.ready
-                self.status.armed.value = self.cam.armed
                 self.status.count.value = self.cam.count
+                if self.cam.triggering is not None:
+                    self.status.triggering.value = self.cam.triggering
+                else:
+                    self.status.triggering.value = -1
 
                 self.status.gain.value = self.cam.settings.get('EMGain', 0)
                 try:
@@ -750,11 +774,10 @@ class StatusObject(object):
     """StatusObject is used to share camera status between processes."""
     def __init__(self):
         self.pid = Value(c_int)
-        self.armed = Value(c_bool)
+        self.triggering = Value(c_int)
         self.enabled = Value(c_bool)
         self.count = Value(c_int)
         self.port = Value(c_int)
-        self.ready = Value(c_bool)
         self.serial = Value(c_int)
         self.temperature = Value(c_int)
         self.gain = Value(c_int)
@@ -862,8 +885,19 @@ class CameraServer(Process):
             status_thread.start()
 
         daemon = Pyro4.Daemon(port=port, host=host)
-        Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
+        try:
+            Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
                                  daemon=daemon, ns=False, verbose=True)
+        except:
+            pass
+        finally:
+            if self.status_thread:
+                status_thread.should_quit = True
+                status_thread.join()
+            if self.cam.data_thread:
+                data_thread.should_quit = True
+                data_thread.join()
+
 
 
 
@@ -876,8 +910,8 @@ if __name__ == '__main__':
     time we connect to the camera from cockpit.
     """
     def report_status(status_list):
-        labels = ('ID', 'PID', 'port', 'enab', 'ready', 
-                  'armed', 'temp', 'count', 'gain')
+        labels = ('ID', 'PID', 'port', 'enab', 
+                  'trigger', 'temp', 'count', 'gain')
         
         format_str = '|'.join(['%%%ds' % (len(label) + 2) for label in labels])
         format_str += '\n'
@@ -908,8 +942,7 @@ if __name__ == '__main__':
                 status.pid.value,
                 status.port.value,
                 status.enabled.value,
-                status.ready.value,
-                status.armed.value,
+                TRIGGERS[status.triggering.value],
                 status.temperature.value if status.valid_temperature.value else '???',
                 status.count.value,
                 'EM%d' % status.gain.value if status.em.value else 'Conv',)
@@ -958,7 +991,10 @@ if __name__ == '__main__':
             else:
                 # nothing to do.
                 pass
+    except KeyboardInterrupt:
+        print "\n\nExiting\n\n"
     finally:
         for c in children:
             # As this process exits, clean up child processes.
+            print "... terminating camera process ..."
             c.terminate()
