@@ -34,7 +34,7 @@ import numpy
 import Pyro4
 Pyro4.config.SERIALIZER = 'pickle'
 Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
-import sys
+import sys, os, psutil
 import threading
 import time
 import weakref
@@ -901,7 +901,19 @@ class CameraServer(Process):
         sdk.SetCurrentCamera(handle)
 
         self.cam = Camera(handle, singleton=True)
-        self.cam.Initialize('')
+        init_success = False
+        retry_delay = 5
+        while not init_success:
+            try:
+                self.cam.Initialize('')
+            except:
+                msgstr = 'Camera failed to initialize.'
+                msgstr += ' Retrying in %ds.\n' % retry_delay
+                sys.stdout.write(msgstr)
+                time.sleep(retry_delay)
+            else:
+                init_success = True
+
         serial = self.cam.get_camera_serial_number()
 
         if not self.serial_to_host.has_key(serial):
@@ -987,7 +999,6 @@ if __name__ == '__main__':
         sys.stdout.write('\033[%d;1H' % (num_cameras.value + 4))
         time.sleep(0.5)
 
-
     import colorama
     # Fix for a win32 and colorama bug
     try:
@@ -998,14 +1009,40 @@ if __name__ == '__main__':
     else:
         del(test)
     colorama.init()
+    sys.stdout.write('\033[2J') # Clear the terminal window.
+
+    # I have no idea why, but termination behaviour under Windows is
+    # unpredicatble. Sometimes, child processes with daemon=True are
+    # terminated correctly when the parent process exits. Other times,
+    # in what look like the same userspace conditions, they hang around,
+    # perhaps indefinitely. So we need to take care of any lingering
+    # processes here.
+    killed_zombies = False
+    if os.path.isfile('pids.lock'):
+        # Get a list of running python instances
+        pythons = [proc.pid for proc in psutil.get_process_list()
+                        if proc.name == 'python.exe']
+
+        # Kill any instances which have entries in the PIDs file.
+        with open('pids.lock', 'r') as f:
+            for line in f:
+                pid = int(line)
+                if pid in pythons:
+                    sys.stdout.write("Killing zombie process %s.\n" % pid)
+                    os.kill(pid, -9)
+                    killed_zombies = True
+
+    if killed_zombies:
+        t = 5
+        sys.stdout.write("Waiting %d seconds for zombies to die.\n" % t)
+        time.sleep(t)
 
     num_cameras = c_long()
     sdk.GetAvailableCameras(num_cameras)
 
     children = []
     statuses = []
-    sys.stdout.write('\033[2J') # Clear the terminal window.
-    sys.stdout.write("Found %d cameras." % num_cameras.value)
+    sys.stdout.write("Found %d cameras.\n" % num_cameras.value)
 
     for i in range(num_cameras.value):
         # For each camera we found ...
@@ -1013,10 +1050,15 @@ if __name__ == '__main__':
         statuses.append(StatusObject())
         # ... spawn a CameraServer in a separate process, ...
         children.append(CameraServer(i, status=statuses[i]))
-        sys.stdout.write("Starting service %d of %d in daemon process ..."
-                % (i + 1, num_cameras.value))
         # ... and start the child process.
         children[i].start()
+        sys.stdout.write("Starting service %d of %d in daemon process %d ...\n"
+                % (i + 1, num_cameras.value, children[i].pid))
+
+    # Write out the child PIDs to a file.
+    with open('pids.lock', 'w') as f:
+        for child in children:
+            f.write('%d\n' % child.pid)
 
     try:
         while True:
