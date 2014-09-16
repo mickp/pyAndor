@@ -43,6 +43,15 @@ from ctypes import create_string_buffer, c_char, c_bool
 from multiprocessing import Process, Value, Array
 from collections import namedtuple
 
+try:
+    from cameras import camera_keys as _camera_keys
+    from cameras import cameras as _cameras
+except:
+    CAMERAS = {}
+else:
+    CAMERAS = {camera[0]: dict(zip(_camera_keys, camera)) for camera in _cameras}
+
+
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
 TRIGGERS = {-1: 'off',
@@ -864,8 +873,11 @@ class CameraServer(Process):
         self.daemon = True
         self.index = index
         #TODO - should read serial_to_* from config file.
-        self.serial_to_host = {9145: '127.0.0.1', 9146: '127.0.0.1'}
-        self.serial_to_port = {9145: 7776, 9146: 7777}
+        self.serial_to_host = {}
+        self.serial_to_port = {}
+        for label, cam in CAMERAS.iteritems():
+            self.serial_to_host.update({cam['serial']: cam['ipAddress']})
+            self.serial_to_port.update({cam['serial']: cam['port']})
         self.cam = None
         self.status = status
 
