@@ -214,7 +214,7 @@ class Camera(object):
         # Is the camera armed to respond to triggers?
         self.triggering = None
         # The current acquisition mode.
-        self.acquistion_mode = None
+        self.acquisition_mode = None
         # Thread to handle data on exposure
         self.data_thread = None
         self.settings = {}
@@ -359,7 +359,7 @@ class Camera(object):
     @with_camera
     def get_min_time_between_exposures(self):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
-        if self.acquisition_mode in [1, 5]:
+        if self.acquisition_mode in [1, 5, 7]:
             # single exposure or run until abort
             return self.get_read_out_time()
         elif self.acquisition_mode == 2:
@@ -368,6 +368,10 @@ class Camera(object):
         elif self.acquisition_mode in [3, 4]:
             # kinetics mode
             return kinetics - exposure
+        else:
+            # acquisition mode not configured.
+            # Return 100ms, although should consider raising an exception here.
+            return 0.1
 
 
     def get_settings(self):
