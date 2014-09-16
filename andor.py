@@ -415,6 +415,14 @@ class Camera(object):
                 self.data_thread.set_client(self.client)
 
 
+    def skip_images(self, next=None, every=None):
+        if next:
+            self.data_thread.skip_next_n_images = next
+
+        if every:
+            self.data_thread.skip_every_n_images = every
+
+
     @with_camera
     def update_settings(self, settings, init=False):
         # Store the triggering state on entry.
@@ -703,8 +711,26 @@ class DataThread(threading.Thread):
                 raise
 
             if result[0] == sdk.DRV_SUCCESS:
-                timestamp = 0 # TODO - fix timestamp.
+                # increment the camera exposure counter
                 self.cam.count += 1
+                # increment our exposure counter
+                self.exposure_count += 1
+                # indicate that there is data to send
+                send_data = True
+
+                if self.skip_next_n_images > 0:
+                    self.skip_next_n_images -= 1
+                    send_data = False
+
+                if self.exposure_count % self.skip_every_n_images > 0:
+                    send_data = False
+            else:
+                send_data = False
+
+            if send_data:
+                # Timestamp.  When using external triggering, the camera
+                # offers nothing more accurate than the system time.
+                timestamp = time.time()
                 if self.client is not None:
                     try:
                         self.client.receiveData('new image',
