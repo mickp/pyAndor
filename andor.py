@@ -40,7 +40,7 @@ import time
 import weakref
 from ctypes import byref, c_float, c_int, c_long, c_ulong
 from ctypes import create_string_buffer, c_char, c_bool
-from multiprocessing import Process, Value, Array
+from multiprocessing import Process, Value
 from collections import namedtuple
 
 try:
@@ -699,11 +699,11 @@ class DataThread(threading.Thread):
         self.skip_next_n_images = 0
         self.exposure_count = 0
         self.skip_every_n_images = 1
-        self.should_quit = False
         self.cam = weakref.proxy(cam)
         self.image_array = numpy.zeros((cam.nx, cam.ny), dtype=numpy.uint16)
         self.n_pixels = cam.nx * cam.ny
         self.client = client
+        self.run_flag = True
 
 
     def __del__(self):
@@ -712,7 +712,7 @@ class DataThread(threading.Thread):
 
 
     def run(self):
-        while not self.should_quit:
+        while self.run_flag:
             try:
                 result = self.cam.GetOldestImage16(self.image_array,
                                                    self.n_pixels)
@@ -758,78 +758,8 @@ class DataThread(threading.Thread):
         self.client = client
 
 
-class StatusThread(threading.Thread):
-    """A thread to maintain a status object."""
-    def __init__(self, cam, port, status):
-        threading.Thread.__init__(self)
-        self.cam = cam
-        self.status = status
-        self.status.port.value = port
-        self.should_quit = False
-
-
-    def __del__(self):
-        if self.is_alive:
-            self.should_quit = True
-
-
-    def run(self):
-        while not self.should_quit:
-            if not self.status.live.value:
-            # Status does not show camera is live.
-                serial = None
-                try:
-                    serial = self.cam.get_camera_serial_number()
-                except:
-                    # Driver probably not initialized.
-                    pass
-                # Did we get a serial number?
-                if serial:
-                    self.status.serial.value = serial
-                    self.status.live.value = True
-            else:
-            # Status shows camera is live.
-                try:
-                    temperature = self.cam.get_temperature()
-                except:
-                    # Driver probably finished initialization.
-                    self.status.valid_temperature.value = False
-                else:
-                    self.status.valid_temperature.value = True
-                    self.status.temperature.value = temperature
-
-                self.status.enabled.value = self.cam.enabled
-                self.status.count.value = self.cam.count
-                if self.cam.triggering is not None:
-                    self.status.triggering.value = self.cam.triggering
-                else:
-                    self.status.triggering.value = -1
-
-                self.status.gain.value = self.cam.settings.get('EMGain', 0)
-                try:
-                    is_em = self.cam.settings['amplifierMode']['amplifier'] == 0
-                except:
-                    is_em = False
-                self.status.em.value = is_em
-
-            time.sleep(1)
-
-
-class StatusObject(object):
-    """StatusObject is used to share camera status between processes."""
-    def __init__(self):
-        self.pid = Value(c_int)
-        self.triggering = Value(c_int)
-        self.enabled = Value(c_bool)
-        self.count = Value(c_int)
-        self.port = Value(c_int)
-        self.serial = Value(c_int)
-        self.temperature = Value(c_int)
-        self.gain = Value(c_int)
-        # These values are False until we find otherwise.
-        self.valid_temperature = Value(c_bool, False)
-        self.live = Value(c_bool, False)
-        self.em = Value(c_bool, False)
+    def stop(self):
+        self.run_flag = False
 
 
 class CameraManager(object):
@@ -865,36 +795,25 @@ class CameraManager(object):
             self.handle_to_camera.update({handle.value: i})
 
 
-class CameraServer(Process):
-    """A class to serve Camera objects over Pyro."""
-    def __init__(self, index, status=None):
-        super(CameraServer, self).__init__()
-        # daemon=True means that this process will be terminated with parent.
-        self.daemon = True
+class SingleCameraServer(Process):
+    """A process to serve a single Camera object over Pyro."""
+    def __init__(self, index, serial_to_host, serial_to_port):
+        super(SingleCameraServer, self).__init__()
+        # Camera index.
         self.index = index
-        #TODO - should read serial_to_* from config file.
-        self.serial_to_host = {}
-        self.serial_to_port = {}
-        for label, cam in CAMERAS.iteritems():
-            self.serial_to_host.update({cam['serial']: cam['ipAddress']})
-            self.serial_to_port.update({cam['serial']: cam['port']})
+        # Mapping of camera serial number to host.
+        self.serial_to_host = serial_to_host
+        # Mapping of camera serial number to port.
+        self.serial_to_port = serial_to_port
+        # Shared object that indicates we should continue running.
+        self.shared_run_flag = Value('b', True)
+        # The camera object.
         self.cam = None
-        self.status = status
+        # A thread to run the Pyro daemon.
+        self.pyro_thread = None
 
 
     def run(self):
-        self.serve()
-
-
-    def serve(self):
-        ## This works for each camera ... once.  If a process is
-        # terminated then you try and create a new process for the same
-        # camera, the SDK will not succesfully Initialize.
-
-        # TODO: I think we may need to call Shutdown before the
-        # process exits ... but Process.terminate kills it right away,
-        # so we probaly need to stop the Pyro Daemon, then call
-        # Shutdown, then return / join the main process.
         serial = None
         num_cameras = c_long()
         handle = c_long()
@@ -939,150 +858,56 @@ class CameraServer(Process):
         host = self.serial_to_host[serial]
         port = self.serial_to_port[serial]
 
-        if self.status:
-            self.status.pid.value = self.pid
-            status_thread = StatusThread(self.cam, port, self.status)
-            status_thread.start()
-
         daemon = Pyro4.Daemon(port=port, host=host)
-        try:
-            Pyro4.Daemon.serveSimple({self.cam: 'pyroCam'},
-                                 daemon=daemon, ns=False, verbose=True)
-        except:
-            pass
-        finally:
-            if self.status_thread:
-                status_thread.should_quit = True
-                status_thread.join()
-            if self.cam.data_thread:
-                data_thread.should_quit = True
-                data_thread.join()
+
+        self.pyro_thread = threading.Thread(
+            target=Pyro4.Daemon.serveSimple,
+            args=({self.cam: 'pyroCam'}),
+            kwargs={'daemon':daemon, 'ns':False})
+        self.pyro_thread.start()
+
+        while self.shared_run_flag.value:
+            sleep(1)
+
+        daemon.Shutdown()
+
+        if hasattr(self.cam, 'data_thread'):
+            data_thread.stop()
+            data_thread.join()
+
+        self.cam.Shutdown()
+        deamon_thread.join()
+
+    def stop(self):
+        self.shared_run_flag.value = False
 
 
+class Server(object):
+    def __init__(self):
+        self.serial_to_host = {}
+        self.serial_to_port = {}
+        self.cam_processes = []
+        self.run_flag = True
 
 
-if __name__ == '__main__':
-    """ If called from the command line, create CameraServers.
+    def run(self):
+        for label, cam in CAMERAS.iteritems():
+            self.serial_to_host.update({cam['serial']: cam['ipAddress']})
+            self.serial_to_port.update({cam['serial']: cam['port']})
 
-    There will be a delay while the dll initializes each camera:  it
-    does not seem able to do concurrent initializations, even in
-    separate processes.  Hopefully, this will prevent any delay each
-    time we connect to the camera from cockpit.
-    """
-    def report_status(status_list):
-        labels = ('ID', 'PID', 'port', 'enab', 
-                  'trigger', 'temp', 'count', 'gain')
-        
-        format_str = '|'.join(['%%%ds' % (len(label) + 2) for label in labels])
-        format_str += '\n'
+        for i in range(len(serial_to_host)):
+            self.cam_processes[i] = SingleCameraServer(i, 
+                                                       self.serial_to_host, 
+                                                       self.serial_to_port)
+            self.cam_processes[i].start()
 
-        # Would be nice to save and restore the cursor position, but there
-        # is no stock curses support under Windows.
-        # Move cursor to top of console.
-        sys.stdout.write('\033[1;1H')
+        while run_flag:
+            sleep(1)
 
-        # Generate and display a header row.
-        sstr = format_str % labels
-        sys.stdout.write(sstr)
 
-        # Generate and display a status row for each status.
-        for i, status in enumerate(statuses):
-            sstr = ''
-            sstr += '\033[30m' #and Black foreground
-            if not status.live.value:
-                sstr += '\033[41m' # red background
-            elif not status.enabled.value:
-                sstr += '\033[43m' # yellow background
-            else:
-                sstr += '\033[42m' # green background
-            sstr += format_str % (
-                status.serial.value,
-                status.pid.value,
-                status.port.value,
-                status.enabled.value,
-                TRIGGERS[status.triggering.value],
-                status.temperature.value if status.valid_temperature.value else '???',
-                status.count.value,
-                'EM%d' % status.gain.value if status.em.value else 'Conv',)
-            sys.stdout.write(sstr)
-        # Reset colours.
-        sys.stdout.write('\033[39m\033[49m')
-        # Move cursor down a few rows.
-        sys.stdout.write('\033[%d;1H' % (num_cameras.value + 4))
-        time.sleep(0.5)
-
-    import colorama
-    # Fix for a win32 and colorama bug
-    try:
-        test = colorama.Win32.COORD(0,0)
-    except:
-        from ctypes.wintypes import _COORD
-        colorama.win32.COORD = _COORD
-    else:
-        del(test)
-    colorama.init()
-    sys.stdout.write('\033[2J') # Clear the terminal window.
-
-    # I have no idea why, but termination behaviour under Windows is
-    # unpredicatble. Sometimes, child processes with daemon=True are
-    # terminated correctly when the parent process exits. Other times,
-    # in what look like the same userspace conditions, they hang around,
-    # perhaps indefinitely. So we need to take care of any lingering
-    # processes here.
-    killed_zombies = False
-    if os.path.isfile('pids.lock'):
-        # Get a list of running python instances
-        pythons = [proc.pid for proc in psutil.get_process_list()
-                        if proc.name == 'python.exe']
-
-        # Kill any instances which have entries in the PIDs file.
-        with open('pids.lock', 'r') as f:
-            for line in f:
-                pid = int(line)
-                if pid in pythons:
-                    sys.stdout.write("Killing zombie process %s.\n" % pid)
-                    os.kill(pid, -9)
-                    killed_zombies = True
-
-    if killed_zombies:
-        t = 5
-        sys.stdout.write("Waiting %d seconds for zombies to die.\n" % t)
-        time.sleep(t)
-
-    num_cameras = c_long()
-    sdk.GetAvailableCameras(num_cameras)
-
-    children = []
-    statuses = []
-    sys.stdout.write("Found %d cameras.\n" % num_cameras.value)
-
-    for i in range(num_cameras.value):
-        # For each camera we found ...
-        # ... create a shared status object, ...
-        statuses.append(StatusObject())
-        # ... spawn a CameraServer in a separate process, ...
-        children.append(CameraServer(i, status=statuses[i]))
-        # ... and start the child process.
-        children[i].start()
-        sys.stdout.write("Starting service %d of %d in daemon process %d ...\n"
-                % (i + 1, num_cameras.value, children[i].pid))
-
-    # Write out the child PIDs to a file.
-    with open('pids.lock', 'w') as f:
-        for child in children:
-            f.write('%d\n' % child.pid)
-
-    try:
-        while True:
-            if statuses:
-                report_status(statuses)
-            else:
-                # nothing to do.
-                pass
-    except KeyboardInterrupt:
-        print "\n\nExiting\n\n"
-    finally:
-        for c in children:
-            # As this process exits, clean up child processes.
-            print "... terminating camera process ..."
-            c.terminate()
+    def shutdown(self):
+        for proc in self.cam_processes:
+            proc.stop()
+            proc.join()
+            del(proc)
+        self.run_flag = 0
