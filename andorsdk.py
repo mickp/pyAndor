@@ -7,7 +7,7 @@ restypes and argtype on those attributes.
 
 When called by concurrent processes, SetCurrentCamera sets the camera only
 for the calling process - not all running processes."""
-import re, sys, functools
+import re, sys, functools, os
 from ctypes import Structure, WinDLL, POINTER
 from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
 from ctypes import c_ubyte, c_short, c_float, c_double, c_char, c_char_p
@@ -15,8 +15,10 @@ from ctypes import c_void_p
 from ctypes.wintypes import BYTE, WORD, DWORD, HANDLE, HWND
 from numpy.ctypeslib import ndpointer
 
+PATH = os.path.dirname(os.path.abspath(__file__))
+DLL_FILE = os.path.join(PATH, 'atmcd64d.dll')
 
-_dll = WinDLL('atmcd64d.dll')
+_dll = WinDLL(DLL_FILE)
 
 """Version Information Definitions"""
 ## Version infomration enumeration
