@@ -467,16 +467,6 @@ class Camera(object):
     def update_settings(self, settings, init=False):
         # Store the triggering state on entry.
         triggering_on_entry = self.triggering
-        # Clear the flag so that our client will poll until it is True.
-        self.enabled = False
-        try:
-            # Stop whatever the camera was doing.
-            self.abort()
-        except Exception:
-            try:
-                self.Initialize('')
-            except:
-                raise
 
         if init:
             # Assume nothing about state: set everything.
@@ -487,10 +477,29 @@ class Camera(object):
             # Only update new and changed values.
             my_keys = set(self.settings.keys())
             their_keys = set(settings.keys())
-            update_keys = their_keys.union(
-                            set(key for key in
+            update_keys = set(key for key in
                                my_keys.intersection(their_keys)
-                               if self.settings[key] != settings[key]))
+                               if self.settings[key] != settings[key])
+
+            
+        if len(update_keys) == 0:
+            # there is nothing to update
+            return self.enabled
+        else:
+            self.logger.log('Need to update %d settings.' % len(update_keys))
+
+        self.logger.log('Updating settings.')
+        # Clear the flag so that our client will poll until it is True.
+        self.enabled = False
+
+        try:
+            # Stop whatever the camera was doing.
+            self.abort()
+        except Exception:
+            try:
+                self.Initialize('')
+            except:
+                raise
 
         # Update this camera's settings dict.
         self.settings.update(settings)
