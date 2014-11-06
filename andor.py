@@ -169,6 +169,25 @@ class CameraMeta(type):
         return type.__new__(meta, classname, supers, classdict)
 
 
+class CameraLogger(object):
+    def __init__(self):
+        self.fh = None
+
+    def log(self, message):
+        if self.fh:
+            self.fh.write(time.strftime('%Y-%m-%d %H:%M:%S:  '))
+            self.fh.write(message + '\n')
+            self.fh.flush()
+
+    def open(self, filename):
+        path = os.path.dirname(os.path.abspath(__file__))
+        self.fh = open(os.path.join(path, str(filename) + '.txt'), 'w')
+
+    def close(self):
+        self.fh.close()
+        self.fh = None
+
+
 class Camera(object):
     """Camera class for Andor cameras.
 
@@ -228,17 +247,20 @@ class Camera(object):
         self.data_thread = None
         self.settings = {}
         self.client = None
+        self.logger = CameraLogger()
 
 
     ### Client functions. ###
     @with_camera
     def abort(self):
+        self.logger.log('Aborting acquisition.')
         self.AbortAcquisition()
         self.triggering = None
 
 
     @with_camera
     def arm(self):
+        self.logger.log('Arming camera.')
         if not self.is_ready():
             pass
         #    raise Exception("Camera not ready.")
@@ -256,21 +278,25 @@ class Camera(object):
         # Enable external triggering
         self.SetTriggerMode(1)
         self.triggering = 1
+        self.logger.log('External triggers enabled.')
 
         # Reset image count.
         self.count = 0
 
         # Make sure there is a data thread running.
         if not self.data_thread or not self.data_thread.is_alive():
+            self.logger.log('Starting data thread.')
             self.data_thread = DataThread(self, self.client)
             self.data_thread.start()
 
         # Set camera to espond to triggers.
+        self.logger.log('Starting acquisition.')
         self.StartAcquisition()
 
 
     @with_camera
     def disable(self):
+        self.logger.log('Disabling camera.')
         self.enabled = False
         try:
             self.abort()
@@ -278,13 +304,10 @@ class Camera(object):
             pass
         self.make_safe()
         if self.data_thread:
-            self.data_thread.should_quit = True
-            self.data_thread.join()
-        # Could call self.Shutdown here, but that would require slow
-        # AD calibration on next enable.
-        # TODO: figure out where to call ShutDown before exit / on
-        # camera destruction ... can't see how to use a 'with' context
-        # manager here.
+            if self.data_thread.is_alive():
+                self.data_thread.stop()
+                self.data_thread.join(5)
+            self.data_thread = None
 
 
     @with_camera
@@ -343,6 +366,8 @@ class Camera(object):
         self.enabled = True
 
         self.arm()
+
+        self.logger.log('Camera enabled.')
 
         return self.enabled
 
@@ -404,6 +429,7 @@ class Camera(object):
             # This means the amplier mode is undefined.
             self.settings.update({'amplifierMode': None})
 
+        self.logger.log('Camera disabled and made safe.')
         self.enabled = False
 
 
@@ -417,18 +443,23 @@ class Camera(object):
     def receiveClient(self, uri):
         """Handle connection request from cockpit client."""
         if uri is None:
+            self.logger.log('Clearing receiveClient.')
             self.client = None
         else:
+            self.logger.log('Setting receiveClient to ' + uri + '.')
             self.client = Pyro4.Proxy(uri)
             if self.data_thread is not None:
+                self.logger.log('receiveClient set in data_thread.')
                 self.data_thread.set_client(self.client)
 
 
     def skip_images(self, next=None, every=None):
         if next:
+            self.logger.log('Skipping next %d images.' % next)
             self.data_thread.skip_next_n_images = next
 
         if every:
+            self.logger.log('Skipping every %d images.' % every)
             self.data_thread.skip_every_n_images = every
 
 
@@ -484,11 +515,14 @@ class Camera(object):
 
         # If the camera was responding to triggers, restart acquisition.
         if triggering_on_entry is not None:
+            self.logger.log('Re-enabling triggering: %s.' % triggering_on_entry)
             self.triggering = triggering_on_entry
+            self.SetTriggerMode(self.triggering)
             self.StartAcquisition()
+        else:
+            self.logger.log('No trigger to reinstate.')
 
         return self.enabled
-
 
 
     ### (Fairly) simple wrappers and utility functions. ###
@@ -617,6 +651,10 @@ class Camera(object):
         return s.value
 
 
+    def is_enabled(self):
+        return self.enabled
+
+
     @with_camera
     def is_preamp_gain_available(self, channel, amplifier, index, gain):
         status = c_int()
@@ -712,14 +750,17 @@ class DataThread(threading.Thread):
 
 
     def run(self):
+        self.cam.logger.log('    DataThread: entering run loop.')
         while self.run_flag:
             try:
                 result = self.cam.GetOldestImage16(self.image_array,
                                                    self.n_pixels)
             except:
+                self.cam.logger.log('    DataThread: Exception when tying GetOldestImage16.')
                 raise
 
             if result[0] == sdk.DRV_SUCCESS:
+                self.cam.logger.log('    DataThread: Data retrieved from camera.')
                 # increment the camera exposure counter
                 self.cam.count += 1
                 # increment our exposure counter
@@ -741,17 +782,22 @@ class DataThread(threading.Thread):
                 # offers nothing more accurate than the system time.
                 timestamp = time.time()
                 if self.client is not None:
+                    self.cam.logger.log('    DataThread: Sending data to client.')
                     try:
                         self.client.receiveData('new image',
                                                  self.image_array,
                                                  timestamp)
                     except Pyro4.errors.ConnectionClosedError:
+                        self.logger.log('    DataThread: Client not listening.')
                         # No-one is listening.
                             self.cam.abort()
                             self.should_quit = True
+                else:
+                    self.logger.log('    DataThread: No client to receive data.')
 
             else:
                 time.sleep(0.01)
+        self.cam.logger.log('    DataThread: exiting run loop.')
 
 
     def set_client(self, client):
@@ -846,6 +892,7 @@ class SingleCameraServer(Process):
                 init_success = True
 
         serial = self.cam.get_camera_serial_number()
+        self.cam.logger.open(serial)
 
         if not self.serial_to_host.has_key(serial):
             raise Exception("No host found for camera with serial number %s."
@@ -862,12 +909,12 @@ class SingleCameraServer(Process):
 
         self.pyro_thread = threading.Thread(
             target=Pyro4.Daemon.serveSimple,
-            args=({self.cam: 'pyroCam'}),
+            args=({self.cam: 'pyroCam'},),
             kwargs={'daemon':daemon, 'ns':False})
         self.pyro_thread.start()
 
         while self.shared_run_flag.value:
-            sleep(1)
+            time.sleep(1)
 
         daemon.Shutdown()
 
@@ -876,6 +923,7 @@ class SingleCameraServer(Process):
             data_thread.join()
 
         self.cam.Shutdown()
+        self.cam.logger.close()
         deamon_thread.join()
 
     def stop(self):
@@ -895,17 +943,19 @@ class Server(object):
             self.serial_to_host.update({cam['serial']: cam['ipAddress']})
             self.serial_to_port.update({cam['serial']: cam['port']})
 
-        for i in range(len(serial_to_host)):
-            self.cam_processes[i] = SingleCameraServer(i, 
+        self.cam_preocesses = []
+
+        for i in range(len(self.serial_to_host)):
+            self.cam_processes.append(SingleCameraServer(i, 
                                                        self.serial_to_host, 
-                                                       self.serial_to_port)
+                                                       self.serial_to_port))
             self.cam_processes[i].start()
 
-        while run_flag:
-            sleep(1)
+        while self.run_flag:
+            time.sleep(1)
 
 
-    def shutdown(self):
+    def stop(self):
         for proc in self.cam_processes:
             proc.stop()
             proc.join()
