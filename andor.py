@@ -799,8 +799,8 @@ class DataThread(threading.Thread):
                     except Pyro4.errors.ConnectionClosedError:
                         self.logger.log('    DataThread: Client not listening.')
                         # No-one is listening.
-                            self.cam.abort()
-                            self.should_quit = True
+                        self.cam.abort()
+                        self.should_quit = True
                 else:
                     self.logger.log('    DataThread: No client to receive data.')
 
