@@ -253,7 +253,6 @@ class Camera(object):
     ### Client functions. ###
     @with_camera
     def abort(self):
-        self.logger.log('Aborting acquisition.')
         self.AbortAcquisition()
         self.triggering = None
 
@@ -346,18 +345,17 @@ class Camera(object):
         # Turn the cooler on.
         self.CoolerON()
 
-        # Do not assume anything about the camera state: set everything.
-        # If this is the first call to enable, the amplifier mode is not 
-        # yet defined.
-        if not settings.get('amplifierMode', None):
-            if not self.settings.get('amplifierMode', None):
-                # Amplfier mode isn't set either in existing or new settings.
-                # Set it to None, so that set the default mode.
-                self.settings.update({'amplifierMode': None})
-        self.update_settings(settings, init=True)
 
-        # Set the acquisition mode to run until abort with frame transfer.
-        self.set_acquisition_mode(7)
+        # Set acquisition mode. In old UCSF code, the mode was set to:
+        #  5 for run 'til abort without frame transfer;
+        #  7 for run 'til abort with frame transfer.
+        # However, mode 7 is not documented, so here we use mode 5 and
+        # determine frame transfer usage with SetFrameTransferMode.
+        # In old UCSF code, this was achieved by using acquisition mode 7.
+        self.set_acquisition_mode(5)
+
+
+        self.update_settings(settings, init=True)
 
         # Recalculate VS speed.
         self.set_fastest_vs_speed()
@@ -433,13 +431,6 @@ class Camera(object):
         self.enabled = False
 
 
-    @with_camera
-    def prepare(self, experiment):
-        """Prepare the camera for data acquisition."""
-        self.get_detector()
-        self.get_capabilities()
-
-
     def receiveClient(self, uri):
         """Handle connection request from cockpit client."""
         if uri is None:
@@ -486,7 +477,7 @@ class Camera(object):
             # there is nothing to update
             return self.enabled
         else:
-            self.logger.log('Need to update %d settings.' % len(update_keys))
+            self.logger.log('Need to update %d settings:' % len(update_keys))
 
         self.logger.log('Updating settings.')
         # Clear the flag so that our client will poll until it is True.
@@ -507,14 +498,18 @@ class Camera(object):
         # Apply changed settings to the hardware.
         for key in update_keys:
             val = self.settings.get(key, None)
+            self.logger.log('   %s:  %s' % (key, val))
             if key == 'exposureTime':
-                self.SetExposureTime(float(val))
+                self.set_exposure_time(float(val))
             elif key == 'EMGain':
                 self.SetEMCCDGain(int(val))
             elif key == 'amplifierMode':
                 self.set_amplifier_mode(val)
             elif key == 'targetTemperature':
                 self.set_target_temperature(val)
+            elif key == 'frameTransfer':
+                self.SetFrameTransferMode(val)
+
     
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
@@ -745,6 +740,7 @@ class DataThread(threading.Thread):
         threading.Thread.__init__(self)
         self.skip_next_n_images = 0
         self.exposure_count = 0
+        self.sent_count = 0
         self.skip_every_n_images = 1
         self.cam = weakref.proxy(cam)
         self.image_array = numpy.zeros((cam.nx, cam.ny), dtype=numpy.uint16)
@@ -769,7 +765,6 @@ class DataThread(threading.Thread):
                 raise
 
             if result[0] == sdk.DRV_SUCCESS:
-                self.cam.logger.log('    DataThread: Data retrieved from camera.')
                 # increment the camera exposure counter
                 self.cam.count += 1
                 # increment our exposure counter
@@ -780,9 +775,11 @@ class DataThread(threading.Thread):
                 if self.skip_next_n_images > 0:
                     self.skip_next_n_images -= 1
                     send_data = False
+                    self.cam.logger.log('    DataThread: Skipping image (next N).')
 
                 if self.exposure_count % self.skip_every_n_images > 0:
                     send_data = False
+                    self.cam.logger.log('    DataThread: Skipping image (every N).')
             else:
                 send_data = False
 
@@ -791,19 +788,19 @@ class DataThread(threading.Thread):
                 # offers nothing more accurate than the system time.
                 timestamp = time.time()
                 if self.client is not None:
-                    self.cam.logger.log('    DataThread: Sending data to client.')
                     try:
                         self.client.receiveData('new image',
                                                  self.image_array,
                                                  timestamp)
                     except Pyro4.errors.ConnectionClosedError:
-                        self.logger.log('    DataThread: Client not listening.')
+                        self.cam.logger.log('    DataThread: Data not sent - client not listening.')
                         # No-one is listening.
                         self.cam.abort()
                         self.should_quit = True
+                    # self.cam.logger.log('    DataThread: Data from camera sent to client.')
+                    self.sent_count += 1
                 else:
-                    self.logger.log('    DataThread: No client to receive data.')
-
+                    self.cam.logger.log('    DataThread: Data not sent - no client to receive data.')
             else:
                 time.sleep(0.01)
         self.cam.logger.log('    DataThread: exiting run loop.')
@@ -815,6 +812,8 @@ class DataThread(threading.Thread):
 
     def stop(self):
         self.run_flag = False
+        self.cam.logger.log('    DataThread: sent %d of %d exposures.' 
+                           % (self.sent_count, self.exposure_count))
 
 
 class CameraManager(object):
