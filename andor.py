@@ -245,6 +245,8 @@ class Camera(object):
         self.acquisition_mode = None
         # Thread to handle data on exposure
         self.data_thread = None
+        # A transform to apply to acquired data: fliplr, flipud, rot90.
+        self.base_transform = (0, 0, 0)
         self.settings = {}
         self.client = None
         self.logger = CameraLogger()
@@ -286,6 +288,7 @@ class Camera(object):
         if not self.data_thread or not self.data_thread.is_alive():
             self.logger.log('Starting data thread.')
             self.data_thread = DataThread(self, self.client)
+            self.update_transform()
             self.data_thread.start()
 
         # Set camera to espond to triggers.
@@ -452,6 +455,18 @@ class Camera(object):
         if every:
             self.logger.log('Skipping every %d images.' % every)
             self.data_thread.skip_every_n_images = every
+
+
+    def update_transform(self):
+        if self.data_thread is None:
+            # Nothing to do.
+            return
+        amp_mode = self.settings.get['amplifierMode']
+        flip = amp_mode.get('label').startswith('Conv')
+        t = self.transform
+        tprime = (t[0] if not flip else int(not(t[0])),
+                  t[1], t[2])
+        self.data_thread.update_transform(tprime)
 
 
     @with_camera
@@ -694,6 +709,8 @@ class Camera(object):
             return e.__repr__()
         else:
             self.settings.update({'amplifierMode': mode})
+            # We also need to update the data transform.
+            self.update_transform()
 
 
     @with_camera
@@ -747,11 +764,24 @@ class DataThread(threading.Thread):
         self.n_pixels = cam.nx * cam.ny
         self.client = client
         self.run_flag = True
+        # Transform operation: fliplr, flipud, rot90
+        self.transform = (0, 0, 0)
 
 
     def __del__(self):
         if self.is_alive:
             self.should_quit = True
+
+
+    def transformed_image(self):
+        m = self.image_array
+        return {(0,0,0): m,
+                (0,0,1): numpy.rot90(m),
+                (0,1,0): numpy.flipud(m),
+                (0,1,1): numpy.flipud(numpy.rot90(m)),
+                (1,0,0): numpy.fliplr(m),
+                (1,0,1): numpy.fliplr(numpy.rot90(m)),
+                (1,1,1): numpy.fliplr(numpy.flipud(numpy.rot90(m)))}[self.transform]
 
 
     def run(self):
@@ -790,7 +820,7 @@ class DataThread(threading.Thread):
                 if self.client is not None:
                     try:
                         self.client.receiveData('new image',
-                                                 self.image_array,
+                                                 self.transformed_image,
                                                  timestamp)
                     except Pyro4.errors.ConnectionClosedError:
                         self.cam.logger.log('    DataThread: Data not sent - client not listening.')
@@ -808,6 +838,14 @@ class DataThread(threading.Thread):
 
     def set_client(self, client):
         self.client = client
+
+
+    def set_transform(self, transform):
+        if (type(transform) is tuple and len(transform) == 3 and 
+                all(t ==0 or t == 1 for t in transform)):
+            self.transform = transform
+        else:
+            raise Exception('Bad transform: expected three-element tuple of 1s and 0s.')
 
 
     def stop(self):
