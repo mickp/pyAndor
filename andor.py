@@ -457,16 +457,21 @@ class Camera(object):
             self.data_thread.skip_every_n_images = every
 
 
-    def update_transform(self):
+    def update_transform(self, transform=None):
+        # If a new transform has been provided, save it.
+        if transform is not None:
+            self.base_transform = transform
+        # If there is a data thread, then update its transform
         if self.data_thread is None:
             # Nothing to do.
             return
-        amp_mode = self.settings.get['amplifierMode']
+        amp_mode = self.settings.get('amplifierMode')
         flip = amp_mode.get('label').startswith('Conv')
-        t = self.transform
+        t = self.base_transform
+        self.logger.log('Updating transform: %s' % str(t))
         tprime = (t[0] if not flip else int(not(t[0])),
                   t[1], t[2])
-        self.data_thread.update_transform(tprime)
+        self.data_thread.set_transform(tprime)
 
 
     @with_camera
@@ -773,7 +778,7 @@ class DataThread(threading.Thread):
             self.should_quit = True
 
 
-    def transformed_image(self):
+    def get_transformed_image(self):
         m = self.image_array
         return {(0,0,0): m,
                 (0,0,1): numpy.rot90(m),
@@ -820,7 +825,7 @@ class DataThread(threading.Thread):
                 if self.client is not None:
                     try:
                         self.client.receiveData('new image',
-                                                 self.transformed_image,
+                                                 self.get_transformed_image(),
                                                  timestamp)
                     except Pyro4.errors.ConnectionClosedError:
                         self.cam.logger.log('    DataThread: Data not sent - client not listening.')
