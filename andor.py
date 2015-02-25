@@ -788,10 +788,10 @@ class DataThread(threading.Thread):
         flips = (self.transform[0], self.transform[1])
         rotation = self.transform[2]
 
-        return {(0,0): rot90(m, rotation),
-                (0,1): numpy.flipud(rot90(m, rotation)),
-                (1,0): numpy.fliplr(rot90(m, rotation)),
-                (1,1): numpy.fliplr(numpy.flipud(rot90(m, rotation)))}[self.transform]
+        return {(0,0): numpy.rot90(m, rotation),
+                (0,1): numpy.flipud(numpy.rot90(m, rotation)),
+                (1,0): numpy.fliplr(numpy.rot90(m, rotation)),
+                (1,1): numpy.fliplr(numpy.flipud(numpy.rot90(m, rotation)))}[flips]
 
 
     def run(self):
