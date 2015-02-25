@@ -245,8 +245,6 @@ class Camera(object):
         self.acquisition_mode = None
         # Thread to handle data on exposure
         self.data_thread = None
-        # A transform to apply to acquired data: fliplr, flipud, rot90.
-        self.base_transform = (0, 0, 0)
         self.settings = {}
         self.client = None
         self.logger = CameraLogger()
@@ -458,19 +456,24 @@ class Camera(object):
 
 
     def update_transform(self, transform=None):
-        # If a new transform has been provided, save it.
-        if transform is not None:
-            self.base_transform = transform
         # If there is a data thread, then update its transform
         if self.data_thread is None:
             # Nothing to do.
             return
         amp_mode = self.settings.get('amplifierMode')
         flip = amp_mode.get('label').startswith('Conv')
-        t = self.base_transform
-        self.logger.log('Updating transform: %s' % str(t))
-        tprime = (t[0] if not flip else int(not(t[0])),
-                  t[1], t[2])
+        
+        # orientation transform
+        t1 = self.settings.get('baseTransform') or (0, 0, 0)
+        # readout-mode transform
+        t2 = (0 if not flip else 1, 0, 0)
+        # requested transform
+        t3 = self.settings.get('pathTransform') or (0, 0, 0)
+
+        # resultant transform
+        tprime = tuple(t1[i] ^ t2[i] ^ t3[i] for i in range(3))
+
+        # set this transform on the data_thread
         self.data_thread.set_transform(tprime)
 
 
@@ -529,6 +532,8 @@ class Camera(object):
                 self.set_target_temperature(val)
             elif key == 'frameTransfer':
                 self.SetFrameTransferMode(val)
+            elif key == 'baseTransform' or key == 'pathTransform':
+                self.update_transform()
 
     
         # Recalculate and apply fastest vertical shift speed.
@@ -780,13 +785,13 @@ class DataThread(threading.Thread):
 
     def get_transformed_image(self):
         m = self.image_array
-        return {(0,0,0): m,
-                (0,0,1): numpy.rot90(m),
-                (0,1,0): numpy.flipud(m),
-                (0,1,1): numpy.flipud(numpy.rot90(m)),
-                (1,0,0): numpy.fliplr(m),
-                (1,0,1): numpy.fliplr(numpy.rot90(m)),
-                (1,1,1): numpy.fliplr(numpy.flipud(numpy.rot90(m)))}[self.transform]
+        flips = (self.transform[0], self.transform[1])
+        rotation = self.transform[2]
+
+        return {(0,0): rot90(m, rotation),
+                (0,1): numpy.flipud(rot90(m, rotation)),
+                (1,0): numpy.fliplr(rot90(m, rotation)),
+                (1,1): numpy.fliplr(numpy.flipud(rot90(m, rotation)))}[self.transform]
 
 
     def run(self):
