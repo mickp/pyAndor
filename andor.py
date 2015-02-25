@@ -969,3 +969,12 @@ class Server(object):
             proc.join()
             del(proc)
         self.run_flag = 0
+ 
+
+def main():
+    s = Server()
+    s.run()
+
+
+if __name__ == '__main__':
+    main()
