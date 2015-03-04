@@ -459,6 +459,7 @@ class Camera(object):
         # If there is a data thread, then update its transform
         if self.data_thread is None:
             # Nothing to do.
+            self.logger.log('Received transform %s. No data_thread to update.' % (transform,))
             return
         amp_mode = self.settings.get('amplifierMode')
         flip = amp_mode.get('label').startswith('Conv')
@@ -475,7 +476,12 @@ class Camera(object):
 
         # set this transform on the data_thread
         self.data_thread.set_transform(tprime)
-
+        logstr =  'Updating data_thread transform:\n'
+        logstr += '  base:\t%s\n' % (t1,)
+        logstr += '  mode:\t%s\n' % (t2,)
+        logstr += '  path:\t%s\n' % (t3,)
+        logstr += '  result:\t%s\n' % (tprime,)
+        self.logger.log(logstr)
 
     @with_camera
     def update_settings(self, settings, init=False):
