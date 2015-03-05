@@ -103,7 +103,6 @@ AMPLIFIER_MODES = {
     }
 
 
-
 def with_camera(func):
     """A decorator for camera functions.
 
@@ -239,8 +238,8 @@ class Camera(object):
         self.singleton = singleton
         # Is the camera enabled?
         self.enabled = False
-        # Is the camera armed to respond to triggers?
-        self.triggering = None
+        # Is the camera armed for acquisition?
+        self.acquiring = None
         # The current acquisition mode.
         self.acquisition_mode = None
         # Thread to handle data on exposure
@@ -254,7 +253,7 @@ class Camera(object):
     @with_camera
     def abort(self):
         self.AbortAcquisition()
-        self.triggering = None
+        self.acquiring = False
 
 
     @with_camera
@@ -273,12 +272,6 @@ class Camera(object):
         self.SetReadMode(4)
         # Set image to full sensor.
         self.SetImage(1, 1, 1, self.nx, 1, self.ny)
-
-        # Enable external triggering
-        self.SetTriggerMode(1)
-        self.triggering = 1
-        self.logger.log('External triggers enabled.')
-
         # Reset image count.
         self.count = 0
 
@@ -291,7 +284,12 @@ class Camera(object):
 
         # Set camera to espond to triggers.
         self.logger.log('Starting acquisition.')
-        self.StartAcquisition()
+        try:
+            self.StartAcquisition()
+        except:
+            raise
+        else:
+            self.acquiring = True
 
 
     @with_camera
@@ -302,7 +300,6 @@ class Camera(object):
             self.abort()
         except:
             pass
-        self.make_safe()
         if self.data_thread:
             if self.data_thread.is_alive():
                 self.data_thread.stop()
@@ -394,7 +391,10 @@ class Camera(object):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
         if self.acquisition_mode in [1, 5, 7]:
             # single exposure or run until abort
-            return self.get_read_out_time()
+            t = self.get_read_out_time()
+            if not self.settings.get('fastTrigger'):
+                t += self.get_keep_clean_time()
+            return t
         elif self.acquisition_mode == 2:
             # accumulate mode
             return accumulate - exposure
@@ -486,7 +486,7 @@ class Camera(object):
     @with_camera
     def update_settings(self, settings, init=False):
         # Store the triggering state on entry.
-        triggering_on_entry = self.triggering
+        acquiring_on_entry = self.acquiring
 
         if init:
             # Assume nothing about state: set everything.
@@ -539,7 +539,11 @@ class Camera(object):
             elif key == 'frameTransfer':
                 self.SetFrameTransferMode(val)
             elif key == 'baseTransform' or key == 'pathTransform':
-                self.update_transform()
+                self.update_transform(val)
+            elif key == 'fastTrigger':
+                self.SetFastExtTrigger(val)
+            elif key == 'triggerMode':
+                self.SetTriggerMode(val)
 
     
         # Recalculate and apply fastest vertical shift speed.
@@ -548,15 +552,10 @@ class Camera(object):
         # Set enabled indicator flag.
         self.enabled = True
 
-        # If the camera was responding to triggers, restart acquisition.
-        if triggering_on_entry is not None:
-            self.logger.log('Re-enabling triggering: %s.' % triggering_on_entry)
-            self.triggering = triggering_on_entry
-            self.SetTriggerMode(self.triggering)
+        if acquiring_on_entry:
             self.StartAcquisition()
-        else:
-            self.logger.log('No trigger to reinstate.')
-
+            self.logger.log('Resuming acquisition after settings updates.')
+        
         return self.enabled
 
 
@@ -654,6 +653,13 @@ class Camera(object):
         self.vs_speed = speed.value
         return (index.value, speed.value)
 
+    
+    @with_camera
+    def get_keep_clean_time(self):
+        t = c_float()
+        self.GetKeepCleanTime(t)
+        return t.value
+
 
     @with_camera
     def get_read_out_time(self):
@@ -712,7 +718,7 @@ class Camera(object):
     def set_amplifier_mode(self, mode):
         # If no mode was specified, use the first mode."""
         if mode == None:
-            mode = self.get_amplifier_modes()[0]    
+            mode = self.get_amplifier_modes()[-1]    
         channel = int(mode['channel'])
         amplifier = int(mode['amplifier'])
         index = int(mode['index'])
@@ -747,6 +753,7 @@ class Camera(object):
         self.set_fastest_vs_speed()
         exposure, accumulate, kinetic = self.get_acquisition_timings()
         return exposure
+    
 
     @with_camera
     def set_fastest_vs_speed(self):
@@ -754,7 +761,6 @@ class Camera(object):
         (index, speed) = self.get_fastest_recommended_vs_speed()
         self.SetVSSpeed(int(index))
         return speed
-
 
     @with_camera
     def set_target_temperature(self, target):
