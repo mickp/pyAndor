@@ -554,6 +554,7 @@ class Camera(object):
 
         if acquiring_on_entry:
             self.StartAcquisition()
+            self.acquiring = True
             self.logger.log('Resuming acquisition after settings updates.')
         
         return self.enabled
