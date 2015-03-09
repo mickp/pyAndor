@@ -788,6 +788,7 @@ class DataThread(threading.Thread):
         self.run_flag = True
         # Transform operation: fliplr, flipud, rot90
         self.transform = (0, 0, 0)
+        self.transform_lock = threading.Lock()
 
 
     def __del__(self):
@@ -797,8 +798,9 @@ class DataThread(threading.Thread):
 
     def get_transformed_image(self):
         m = self.image_array
-        flips = (self.transform[0], self.transform[1])
-        rotation = self.transform[2]
+        with self.transform_lock:
+            flips = (self.transform[0], self.transform[1])
+            rotation = self.transform[2]
 
         return {(0,0): numpy.rot90(m, rotation),
                 (0,1): numpy.flipud(numpy.rot90(m, rotation)),
@@ -865,7 +867,8 @@ class DataThread(threading.Thread):
     def set_transform(self, transform):
         if (type(transform) is tuple and len(transform) == 3 and 
                 all(t ==0 or t == 1 for t in transform)):
-            self.transform = transform
+            with self.transform_lock:
+                self.transform = transform
         else:
             raise Exception('Bad transform: expected three-element tuple of 1s and 0s.')
 
