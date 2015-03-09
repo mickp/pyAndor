@@ -538,7 +538,7 @@ class Camera(object):
                 self.set_target_temperature(val)
             elif key == 'frameTransfer':
                 self.SetFrameTransferMode(val)
-            elif key == 'baseTransform' or key == 'pathTransform':
+            elif key == 'pathTransform':
                 self.update_transform(val)
             elif key == 'fastTrigger':
                 self.SetFastExtTrigger(val)
