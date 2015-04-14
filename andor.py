@@ -51,6 +51,8 @@ except:
 else:
     CAMERAS = {camera[0]: dict(zip(_camera_keys, camera)) for camera in _cameras}
 
+EPSILON = sys.float_info.epsilon
+
 
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
@@ -377,13 +379,15 @@ class Camera(object):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
         if self.acquisition_mode in [1, 5]:
             # single exposure or run untul abort
-            return exposure
+            t = exposure
         elif self.acquisition_mode == 2:
             # accumulate mode
-            return accumulate
+            t = accumulate
         elif self.acquisition_mode in [3, 4]:
             # kinetics or fast kinetics
-            return kinetics
+            t = kinetics
+        # Assume worst-case floating point underestimation
+        return t + t * EPSILON
 
 
     @with_camera
@@ -392,8 +396,13 @@ class Camera(object):
         if self.acquisition_mode in [1, 5, 7]:
             # single exposure or run until abort
             t = self.get_read_out_time()
+            # Assume worst-case floating point underestimation.
+            t += EPSILON * t
             if not self.settings.get('fastTrigger'):
-                t += self.get_keep_clean_time()
+                t_kc = self.get_keep_clean_time()
+                # Assume worst-case floating point underestimation.
+                t_kc += EPSILON * t_kc
+                t += t_kc
             return t
         elif self.acquisition_mode == 2:
             # accumulate mode
@@ -512,6 +521,10 @@ class Camera(object):
         # Clear the flag so that our client will poll until it is True.
         self.enabled = False
 
+        
+
+
+
         try:
             # Stop whatever the camera was doing.
             self.abort()
@@ -523,6 +536,8 @@ class Camera(object):
 
         # Update this camera's settings dict.
         self.settings.update(settings)
+
+
 
         # Apply changed settings to the hardware.
         for key in update_keys:
@@ -548,7 +563,7 @@ class Camera(object):
     
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
-
+        
         # Set enabled indicator flag.
         self.enabled = True
 
