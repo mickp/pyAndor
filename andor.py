@@ -51,6 +51,8 @@ except:
 else:
     CAMERAS = {camera[0]: dict(zip(_camera_keys, camera)) for camera in _cameras}
 
+EPSILON = sys.float_info.epsilon
+
 
 # A list of the camera models this module supports (or should support.)
 SUPPORTED_CAMERAS = ['ixon', 'ixon_plus', 'ixon_ultra']
@@ -101,7 +103,6 @@ AMPLIFIER_MODES = {
         AmplifierMode('Conv16 3MHz' , 0, 1, 0),
         ]
     }
-
 
 
 def with_camera(func):
@@ -239,8 +240,8 @@ class Camera(object):
         self.singleton = singleton
         # Is the camera enabled?
         self.enabled = False
-        # Is the camera armed to respond to triggers?
-        self.triggering = None
+        # Is the camera armed for acquisition?
+        self.acquiring = None
         # The current acquisition mode.
         self.acquisition_mode = None
         # Thread to handle data on exposure
@@ -253,9 +254,8 @@ class Camera(object):
     ### Client functions. ###
     @with_camera
     def abort(self):
-        self.logger.log('Aborting acquisition.')
         self.AbortAcquisition()
-        self.triggering = None
+        self.acquiring = False
 
 
     @with_camera
@@ -274,12 +274,6 @@ class Camera(object):
         self.SetReadMode(4)
         # Set image to full sensor.
         self.SetImage(1, 1, 1, self.nx, 1, self.ny)
-
-        # Enable external triggering
-        self.SetTriggerMode(1)
-        self.triggering = 1
-        self.logger.log('External triggers enabled.')
-
         # Reset image count.
         self.count = 0
 
@@ -287,11 +281,17 @@ class Camera(object):
         if not self.data_thread or not self.data_thread.is_alive():
             self.logger.log('Starting data thread.')
             self.data_thread = DataThread(self, self.client)
+            self.update_transform()
             self.data_thread.start()
 
         # Set camera to espond to triggers.
         self.logger.log('Starting acquisition.')
-        self.StartAcquisition()
+        try:
+            self.StartAcquisition()
+        except:
+            raise
+        else:
+            self.acquiring = True
 
 
     @with_camera
@@ -302,7 +302,6 @@ class Camera(object):
             self.abort()
         except:
             pass
-        self.make_safe()
         if self.data_thread:
             if self.data_thread.is_alive():
                 self.data_thread.stop()
@@ -346,18 +345,17 @@ class Camera(object):
         # Turn the cooler on.
         self.CoolerON()
 
-        # Do not assume anything about the camera state: set everything.
-        # If this is the first call to enable, the amplifier mode is not 
-        # yet defined.
-        if not settings.get('amplifierMode', None):
-            if not self.settings.get('amplifierMode', None):
-                # Amplfier mode isn't set either in existing or new settings.
-                # Set it to None, so that set the default mode.
-                self.settings.update({'amplifierMode': None})
-        self.update_settings(settings, init=True)
 
-        # Set the acquisition mode to run until abort with frame transfer.
-        self.set_acquisition_mode(7)
+        # Set acquisition mode. In old UCSF code, the mode was set to:
+        #  5 for run 'til abort without frame transfer;
+        #  7 for run 'til abort with frame transfer.
+        # However, mode 7 is not documented, so here we use mode 5 and
+        # determine frame transfer usage with SetFrameTransferMode.
+        # In old UCSF code, this was achieved by using acquisition mode 7.
+        self.set_acquisition_mode(5)
+
+
+        self.update_settings(settings, init=True)
 
         # Recalculate VS speed.
         self.set_fastest_vs_speed()
@@ -381,13 +379,15 @@ class Camera(object):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
         if self.acquisition_mode in [1, 5]:
             # single exposure or run untul abort
-            return exposure
+            t = exposure
         elif self.acquisition_mode == 2:
             # accumulate mode
-            return accumulate
+            t = accumulate
         elif self.acquisition_mode in [3, 4]:
             # kinetics or fast kinetics
-            return kinetics
+            t = kinetics
+        # Assume worst-case floating point underestimation
+        return t + t * EPSILON
 
 
     @with_camera
@@ -395,7 +395,15 @@ class Camera(object):
         (exposure, accumulate, kinetics) = self.get_acquisition_timings()
         if self.acquisition_mode in [1, 5, 7]:
             # single exposure or run until abort
-            return self.get_read_out_time()
+            t = self.get_read_out_time()
+            # Assume worst-case floating point underestimation.
+            t += EPSILON * t
+            if not self.settings.get('fastTrigger'):
+                t_kc = self.get_keep_clean_time()
+                # Assume worst-case floating point underestimation.
+                t_kc += EPSILON * t_kc
+                t += t_kc
+            return t
         elif self.acquisition_mode == 2:
             # accumulate mode
             return accumulate - exposure
@@ -433,13 +441,6 @@ class Camera(object):
         self.enabled = False
 
 
-    @with_camera
-    def prepare(self, experiment):
-        """Prepare the camera for data acquisition."""
-        self.get_detector()
-        self.get_capabilities()
-
-
     def receiveClient(self, uri):
         """Handle connection request from cockpit client."""
         if uri is None:
@@ -463,10 +464,38 @@ class Camera(object):
             self.data_thread.skip_every_n_images = every
 
 
+    def update_transform(self, transform=None):
+        # If there is a data thread, then update its transform
+        if self.data_thread is None:
+            # Nothing to do.
+            self.logger.log('Received transform %s. No data_thread to update.' % (transform,))
+            return
+        amp_mode = self.settings.get('amplifierMode')
+        flip = amp_mode.get('label').startswith('Conv')
+        
+        # orientation transform
+        t1 = self.settings.get('baseTransform') or (0, 0, 0)
+        # readout-mode transform
+        t2 = (0 if not flip else 1, 0, 0)
+        # requested transform
+        t3 = self.settings.get('pathTransform') or (0, 0, 0)
+
+        # resultant transform
+        tprime = tuple(t1[i] ^ t2[i] ^ t3[i] for i in range(3))
+
+        # set this transform on the data_thread
+        self.data_thread.set_transform(tprime)
+        logstr =  'Updating data_thread transform:\n'
+        logstr += '  base:\t%s\n' % (t1,)
+        logstr += '  mode:\t%s\n' % (t2,)
+        logstr += '  path:\t%s\n' % (t3,)
+        logstr += '  result:\t%s\n' % (tprime,)
+        self.logger.log(logstr)
+
     @with_camera
     def update_settings(self, settings, init=False):
         # Store the triggering state on entry.
-        triggering_on_entry = self.triggering
+        acquiring_on_entry = self.acquiring
 
         if init:
             # Assume nothing about state: set everything.
@@ -486,11 +515,15 @@ class Camera(object):
             # there is nothing to update
             return self.enabled
         else:
-            self.logger.log('Need to update %d settings.' % len(update_keys))
+            self.logger.log('Need to update %d settings:' % len(update_keys))
 
         self.logger.log('Updating settings.')
         # Clear the flag so that our client will poll until it is True.
         self.enabled = False
+
+        
+
+
 
         try:
             # Stop whatever the camera was doing.
@@ -504,33 +537,40 @@ class Camera(object):
         # Update this camera's settings dict.
         self.settings.update(settings)
 
+
+
         # Apply changed settings to the hardware.
         for key in update_keys:
             val = self.settings.get(key, None)
+            self.logger.log('   %s:  %s' % (key, val))
             if key == 'exposureTime':
-                self.SetExposureTime(float(val))
+                self.set_exposure_time(float(val))
             elif key == 'EMGain':
                 self.SetEMCCDGain(int(val))
             elif key == 'amplifierMode':
                 self.set_amplifier_mode(val)
             elif key == 'targetTemperature':
                 self.set_target_temperature(val)
+            elif key == 'frameTransfer':
+                self.SetFrameTransferMode(val)
+            elif key == 'pathTransform':
+                self.update_transform(val)
+            elif key == 'fastTrigger':
+                self.SetFastExtTrigger(val)
+            elif key == 'triggerMode':
+                self.SetTriggerMode(val)
     
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
-
+        
         # Set enabled indicator flag.
         self.enabled = True
 
-        # If the camera was responding to triggers, restart acquisition.
-        if triggering_on_entry is not None:
-            self.logger.log('Re-enabling triggering: %s.' % triggering_on_entry)
-            self.triggering = triggering_on_entry
-            self.SetTriggerMode(self.triggering)
+        if acquiring_on_entry:
             self.StartAcquisition()
-        else:
-            self.logger.log('No trigger to reinstate.')
-
+            self.acquiring = True
+            self.logger.log('Resuming acquisition after settings updates.')
+        
         return self.enabled
 
 
@@ -628,6 +668,13 @@ class Camera(object):
         self.vs_speed = speed.value
         return (index.value, speed.value)
 
+    
+    @with_camera
+    def get_keep_clean_time(self):
+        t = c_float()
+        self.GetKeepCleanTime(t)
+        return t.value
+
 
     @with_camera
     def get_read_out_time(self):
@@ -686,7 +733,7 @@ class Camera(object):
     def set_amplifier_mode(self, mode):
         # If no mode was specified, use the first mode."""
         if mode == None:
-            mode = self.get_amplifier_modes()[0]    
+            mode = self.get_amplifier_modes()[-1]    
         channel = int(mode['channel'])
         amplifier = int(mode['amplifier'])
         index = int(mode['index'])
@@ -699,6 +746,8 @@ class Camera(object):
             return e.__repr__()
         else:
             self.settings.update({'amplifierMode': mode})
+            # We also need to update the data transform.
+            self.update_transform()
 
 
     @with_camera
@@ -719,6 +768,7 @@ class Camera(object):
         self.set_fastest_vs_speed()
         exposure, accumulate, kinetic = self.get_acquisition_timings()
         return exposure
+    
 
     @with_camera
     def set_fastest_vs_speed(self):
@@ -726,7 +776,6 @@ class Camera(object):
         (index, speed) = self.get_fastest_recommended_vs_speed()
         self.SetVSSpeed(int(index))
         return speed
-
 
     @with_camera
     def set_target_temperature(self, target):
@@ -745,17 +794,33 @@ class DataThread(threading.Thread):
         threading.Thread.__init__(self)
         self.skip_next_n_images = 0
         self.exposure_count = 0
+        self.sent_count = 0
         self.skip_every_n_images = 1
         self.cam = weakref.proxy(cam)
         self.image_array = numpy.zeros((cam.nx, cam.ny), dtype=numpy.uint16)
         self.n_pixels = cam.nx * cam.ny
         self.client = client
         self.run_flag = True
+        # Transform operation: fliplr, flipud, rot90
+        self.transform = (0, 0, 0)
+        self.transform_lock = threading.Lock()
 
 
     def __del__(self):
         if self.is_alive:
             self.should_quit = True
+
+
+    def get_transformed_image(self):
+        m = self.image_array
+        with self.transform_lock:
+            flips = (self.transform[0], self.transform[1])
+            rotation = self.transform[2]
+
+        return {(0,0): numpy.rot90(m, rotation),
+                (0,1): numpy.flipud(numpy.rot90(m, rotation)),
+                (1,0): numpy.fliplr(numpy.rot90(m, rotation)),
+                (1,1): numpy.fliplr(numpy.flipud(numpy.rot90(m, rotation)))}[flips]
 
 
     def run(self):
@@ -769,7 +834,6 @@ class DataThread(threading.Thread):
                 raise
 
             if result[0] == sdk.DRV_SUCCESS:
-                self.cam.logger.log('    DataThread: Data retrieved from camera.')
                 # increment the camera exposure counter
                 self.cam.count += 1
                 # increment our exposure counter
@@ -780,9 +844,11 @@ class DataThread(threading.Thread):
                 if self.skip_next_n_images > 0:
                     self.skip_next_n_images -= 1
                     send_data = False
+                    self.cam.logger.log('    DataThread: Skipping image (next N).')
 
                 if self.exposure_count % self.skip_every_n_images > 0:
                     send_data = False
+                    self.cam.logger.log('    DataThread: Skipping image (every N).')
             else:
                 send_data = False
 
@@ -791,19 +857,19 @@ class DataThread(threading.Thread):
                 # offers nothing more accurate than the system time.
                 timestamp = time.time()
                 if self.client is not None:
-                    self.cam.logger.log('    DataThread: Sending data to client.')
                     try:
                         self.client.receiveData('new image',
-                                                 self.image_array,
+                                                 self.get_transformed_image(),
                                                  timestamp)
                     except Pyro4.errors.ConnectionClosedError:
-                        self.logger.log('    DataThread: Client not listening.')
+                        self.cam.logger.log('    DataThread: Data not sent - client not listening.')
                         # No-one is listening.
-                            self.cam.abort()
-                            self.should_quit = True
+                        self.cam.abort()
+                        self.should_quit = True
+                    # self.cam.logger.log('    DataThread: Data from camera sent to client.')
+                    self.sent_count += 1
                 else:
-                    self.logger.log('    DataThread: No client to receive data.')
-
+                    self.cam.logger.log('    DataThread: Data not sent - no client to receive data.')
             else:
                 time.sleep(0.01)
         self.cam.logger.log('    DataThread: exiting run loop.')
@@ -813,8 +879,19 @@ class DataThread(threading.Thread):
         self.client = client
 
 
+    def set_transform(self, transform):
+        if (type(transform) is tuple and len(transform) == 3 and 
+                all(t ==0 or t == 1 for t in transform)):
+            with self.transform_lock:
+                self.transform = transform
+        else:
+            raise Exception('Bad transform: expected three-element tuple of 1s and 0s.')
+
+
     def stop(self):
         self.run_flag = False
+        self.cam.logger.log('    DataThread: sent %d of %d exposures.' 
+                           % (self.sent_count, self.exposure_count))
 
 
 class CameraManager(object):
@@ -970,3 +1047,12 @@ class Server(object):
             proc.join()
             del(proc)
         self.run_flag = 0
+ 
+
+def main():
+    s = Server()
+    s.run()
+
+
+if __name__ == '__main__':
+    main()
