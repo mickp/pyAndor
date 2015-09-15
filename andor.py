@@ -1030,7 +1030,7 @@ class Server(object):
             self.serial_to_host.update({cam['serial']: cam['ipAddress']})
             self.serial_to_port.update({cam['serial']: cam['port']})
 
-        self.cam_preocesses = []
+        self.cam_processes = []
 
         for i in range(len(self.serial_to_host)):
             self.cam_processes.append(SingleCameraServer(i, 
