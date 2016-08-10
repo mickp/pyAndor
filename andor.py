@@ -1,3 +1,21 @@
+#
+#   A module for control of Andor cameras via the Andor SDK.
+#   Copyright (C) 2015 Mick Phillips
+#   mick.phillips@gmail.com
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
 """A module for control of Andor cameras via the Andor SDK.
 
 Call from the command line to spawn Pyro objects in separate
@@ -472,7 +490,7 @@ class Camera(object):
             return
         amp_mode = self.settings.get('amplifierMode')
         flip = amp_mode.get('label').startswith('Conv')
-        
+
         # orientation transform
         t1 = self.settings.get('baseTransform') or (0, 0, 0)
         # readout-mode transform
@@ -510,7 +528,7 @@ class Camera(object):
                                my_keys.intersection(their_keys)
                                if self.settings[key] != settings[key])
 
-            
+
         if len(update_keys) == 0:
             # there is nothing to update
             return self.enabled
@@ -521,7 +539,7 @@ class Camera(object):
         # Clear the flag so that our client will poll until it is True.
         self.enabled = False
 
-        
+
 
 
 
@@ -560,10 +578,10 @@ class Camera(object):
             elif key == 'triggerMode':
                 self.SetTriggerMode(val)
 
-    
+
         # Recalculate and apply fastest vertical shift speed.
         self.set_fastest_vs_speed()
-        
+
         # Set enabled indicator flag.
         self.enabled = True
 
@@ -571,7 +589,7 @@ class Camera(object):
             self.StartAcquisition()
             self.acquiring = True
             self.logger.log('Resuming acquisition after settings updates.')
-        
+
         return self.enabled
 
 
@@ -598,7 +616,7 @@ class Camera(object):
             self.get_capabilities()
         # Return the amplifier mode labels.
         modes = AMPLIFIER_MODES[self.caps.ulCameraType]
-        
+
         return modes
 
 
@@ -669,7 +687,7 @@ class Camera(object):
         self.vs_speed = speed.value
         return (index.value, speed.value)
 
-    
+
     @with_camera
     def get_keep_clean_time(self):
         t = c_float()
@@ -734,7 +752,7 @@ class Camera(object):
     def set_amplifier_mode(self, mode):
         # If no mode was specified, use the first mode."""
         if mode == None:
-            mode = self.get_amplifier_modes()[-1]    
+            mode = self.get_amplifier_modes()[-1]
         channel = int(mode['channel'])
         amplifier = int(mode['amplifier'])
         index = int(mode['index'])
@@ -769,7 +787,7 @@ class Camera(object):
         self.set_fastest_vs_speed()
         exposure, accumulate, kinetic = self.get_acquisition_timings()
         return exposure
-    
+
 
     @with_camera
     def set_fastest_vs_speed(self):
@@ -881,7 +899,7 @@ class DataThread(threading.Thread):
 
 
     def set_transform(self, transform):
-        if (type(transform) is tuple and len(transform) == 3 and 
+        if (type(transform) is tuple and len(transform) == 3 and
                 all(t ==0 or t == 1 for t in transform)):
             with self.transform_lock:
                 self.transform = transform
@@ -891,7 +909,7 @@ class DataThread(threading.Thread):
 
     def stop(self):
         self.run_flag = False
-        self.cam.logger.log('    DataThread: sent %d of %d exposures.' 
+        self.cam.logger.log('    DataThread: sent %d of %d exposures.'
                            % (self.sent_count, self.exposure_count))
 
 
@@ -1033,8 +1051,8 @@ class Server(object):
         self.cam_processes = []
 
         for i in range(len(self.serial_to_host)):
-            self.cam_processes.append(SingleCameraServer(i, 
-                                                       self.serial_to_host, 
+            self.cam_processes.append(SingleCameraServer(i,
+                                                       self.serial_to_host,
                                                        self.serial_to_port))
             self.cam_processes[i].start()
 
@@ -1048,7 +1066,7 @@ class Server(object):
             proc.join()
             del(proc)
         self.run_flag = 0
- 
+
 
 def main():
     s = Server()

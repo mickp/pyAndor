@@ -1,12 +1,31 @@
-"""andorsdk - a ctypes interfae to Andor's SDK DLL.
+#
+#   andorsdk - a ctypes interface to Andor's SDK DLL.
+#   Copyright (C) 2015 Mick Phillips
+#   mick.phillips@gmail.com
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+"""andorsdk - a ctypes interface to Andor's SDK DLL.
 
-This module defines constants, type and structures from the DLL header
-file.  It also exports functions form the DLL by using a list of function
-prototypes to generate callable module attributes, and setting appropriate
-restypes and argtype on those attributes.
+   This module defines constants, type and structures from the DLL header
+   file.  It also exports functions form the DLL by using a list of function
+   prototypes to generate callable module attributes, and setting appropriate
+   restypes and argtype on those attributes.
 
-When called by concurrent processes, SetCurrentCamera sets the camera only
-for the calling process - not all running processes."""
+   When called by concurrent processes, SetCurrentCamera sets the camera only
+   for the calling process - not all running processes.
+"""
 import re, sys, functools, os
 from ctypes import Structure, WinDLL, POINTER
 from ctypes import c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
@@ -848,7 +867,7 @@ for fndef in function_list:
     # Make the wrapped function an attribute of this module
     setattr(this, fnstr, sdk_wrapper(f))
     camerafuncs.append(sdk_wrapper(f))
-    
+
     # Set the return type - always an int for these SDK functions.
     f.restype = c_int
 
