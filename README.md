@@ -1,3 +1,11 @@
+[![No Maintenance Intended](http://unmaintained.tech/badge.svg)](http://unmaintained.tech/)
+
+# DEPRECATED
+
+This project has been rolled into MicronOxford/microscope.
+
+# andorSDK
+
 andorSDK provides an interface to Andor's SDK DLL via ctypes.
 
 Originally, the DLL was wrapped with SWIG, but ctypes has been chosen
